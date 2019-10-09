@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <syslog.h>
 
 #include <sys/ioctl.h>
 #include <sys/time.h>
@@ -378,6 +379,10 @@ int main(int argc, char **argv)
 	int		t;
 	int		fd;
 	time_t		alarm = 0;
+        
+        openlog ("rtcwake", LOG_NDELAY, LOG_LOCAL6);
+        setlogmask (LOG_UPTO(LOG_DEBUG));
+        syslog (LOG_INFO, "================ start ====================");
 
 	static const struct option long_options[] = {
 		{"adjfile",     required_argument,      0, 'A'},
@@ -395,27 +400,36 @@ int main(int argc, char **argv)
 		{0,		0,			0, 0  }
 	};
 
+        syslog (LOG_INFO, "setlocale start...");
 	setlocale(LC_ALL, "");
+        syslog (LOG_INFO, "bindtextdomain");
 	bindtextdomain(PACKAGE, LOCALEDIR);
+        syslog (LOG_INFO, "testdomain");
 	textdomain(PACKAGE);
+        syslog (LOG_INFO, "atexit");
 	atexit(close_stdout);
 
+        syslog (LOG_INFO, "while");
 	while ((t = getopt_long(argc, argv, "A:ahd:lm:ns:t:uVv",
 					long_options, NULL)) != EOF) {
 		switch (t) {
 		case 'A':
 			/* for better compatibility with hwclock */
 			adjfile = optarg;
+                        syslog (LOG_INFO, "A");
 			break;
 		case 'a':
 			/* CM_AUTO is default */
+                        syslog (LOG_INFO, "a");
 			break;
 
 		case 'd':
 			devname = optarg;
+                        syslog (LOG_INFO, "d");
 			break;
 
 		case 'l':
+                        syslog (LOG_INFO, "l");
 			clock_mode = CM_LOCAL;
 			break;
 
@@ -439,20 +453,25 @@ int main(int argc, char **argv)
 					|| strcmp(optarg, "show") == 0
 			   ) {
 				suspend = optarg;
+                        	syslog (LOG_INFO, "m if");
 				break;
 			}
+                        syslog (LOG_INFO, "m");
 
 			errx(EXIT_FAILURE, _("unrecognized suspend state '%s'"),
 									optarg);
+                        syslog (LOG_ERR, "un recognized suspend state '%s'", optarg);
 			break;
 
 		case 'n':
 			dryrun = 1;
+                        syslog (LOG_INFO, "n");
 			break;
 
 			/* alarm time, seconds-to-sleep (relative) */
 		case 's':
 			seconds = strtou32_or_err(optarg, _("invalid seconds argument"));
+                        syslog (LOG_ERR, "invalid seconds argument");
 			break;
 
 			/* alarm time, time_t (absolute, seconds since
@@ -460,29 +479,37 @@ int main(int argc, char **argv)
 			 */
 		case 't':
 			alarm = strtou32_or_err(optarg, _("invalid time argument"));
+                        syslog (LOG_ERR, "invalid time argument");
 			break;
 
 		case 'u':
 			clock_mode = CM_UTC;
+                        syslog (LOG_INFO, "clock mode CM_UTC");
 			break;
 
 		case 'v':
 			verbose++;
+                        syslog (LOG_INFO, "v");
 			break;
 
 		case 'V':
 			printf(_("%s from %s\n"),
 			       program_invocation_short_name, PACKAGE_STRING);
+                        syslog (LOG_INFO, "EXIT_SUCCESS: %s from %s", program_invocation_short_name, PACKAGE_STRING);
 			exit(EXIT_SUCCESS);
 
 		case 'h':
+                        syslog (LOG_INFO, "useage");
 			usage(stdout);
 		default:
+                        syslog (LOG_INFO, "error");
 			usage(stderr);
 		}
 	}
+        syslog (LOG_INFO, "while over");
 
 	if (clock_mode == CM_AUTO) {
+                syslog (LOG_INFO, "clock_mode == CM_AUTO");
 		if (read_clock_mode() < 0) {
 			printf(_("%s: assuming RTC uses UTC ...\n"),
 					program_invocation_short_name);
@@ -497,12 +524,14 @@ int main(int argc, char **argv)
 				  strcmp(suspend,"show")) {
 
 		warnx(_("must provide wake time (see -t and -s options)"));
+                syslog (LOG_WARNING, "must provide wake time");
 		usage(stderr);
 	}
 
 	/* when devname doesn't start with /dev, append it */
 	if (strncmp(devname, "/dev/", strlen("/dev/")) != 0) {
 		char *new_devname;
+        	syslog (LOG_INFO, "devname doesn't start with /dev");
 
 		new_devname = xmalloc(strlen(devname) + strlen("/dev/") + 1);
 
@@ -514,67 +543,96 @@ int main(int argc, char **argv)
 	if (strcmp(suspend, "on") != 0 && strcmp(suspend, "no") != 0
 			&& !is_wakeup_enabled(devname))
 		errx(EXIT_FAILURE, _("%s not enabled for wakeup events"), devname);
+        	syslog (LOG_ERR, "%s not enabled for wakeup events", devname);
 
 	/* this RTC must exist and (if we'll sleep) be wakeup-enabled */
 #ifdef O_CLOEXEC
+        syslog (LOG_INFO, "O_CLOEXEC");
 	fd = open(devname, O_RDONLY | O_CLOEXEC);
 #else
+        syslog (LOG_INFO, "O_CLOEXEC else");
 	fd = open(devname, O_RDONLY);
 #endif
-	if (fd < 0)
+	if (fd < 0) {
 		err(EXIT_FAILURE, _("cannot open %s"), devname);
+                syslog (LOG_ERR, "cannot open %s", devname);
+        }
 
 	/* relative or absolute alarm time, normalized to time_t */
-	if (get_basetimes(fd) < 0)
+        int gbt = get_basetimes(fd);
+	if (gbt < 0) {
 		exit(EXIT_FAILURE);
-	if (verbose)
+        	syslog (LOG_INFO, "exit failure: %d", gbt);
+        }
+	if (verbose) {
 		printf(_("alarm %ld, sys_time %ld, rtc_time %ld, seconds %u\n"),
 				alarm, sys_time, rtc_time, seconds);
+        	syslog (LOG_INFO, "alarm %ld, sys_time %ld, rtc_time %ld, seconds %u", alarm, sys_time, rtc_time, seconds);
+        }
 
 	if (strcmp(suspend, "show") && strcmp(suspend, "disable")) {
 		if (strcmp(suspend, "no") && strcmp(suspend, "on") &&
 		    strcmp(suspend, "off") && is_suspend_available(suspend) <= 0) {
 			errx(EXIT_FAILURE, _("suspend to \"%s\" unavailable"), suspend);
+        		syslog (LOG_ERR, "exit failure: suspend to %s unavailable", suspend);
 		}
 
 		/* care about alarm setup only if the show|disable
 		 * modes are not set
 		 */
 		if (alarm) {
-			if (alarm < sys_time)
+			if (alarm < sys_time) {
 				errx(EXIT_FAILURE, _("time doesn't go backward to %s"),
 						ctime(&alarm));
+        			syslog (LOG_ERR, "time doesn't go backward to %s", ctime(&alarm));
+			}
 			alarm += sys_time - rtc_time;
 		} else
 			alarm = rtc_time + seconds + 1;
 
-		if (setup_alarm(fd, &alarm) < 0)
+		if (setup_alarm(fd, &alarm) < 0) {
+        		syslog (LOG_ERR, "exit_failure setup_alarm");
 			exit(EXIT_FAILURE);
+		}
 
-		if (strcmp(suspend, "no") == 0 || strcmp(suspend, "on") == 0)
+		if (strcmp(suspend, "no") == 0 || strcmp(suspend, "on") == 0) {
 			printf(_("%s: wakeup using %s at %s"),
 				program_invocation_short_name, devname,
 				ctime(&alarm));
-		else
+        		syslog (LOG_INFO, "%s: wakeup using %s at %s",
+				program_invocation_short_name, devname, ctime(&alarm));
+		}
+		else {
 			printf(_("%s: wakeup from \"%s\" using %s at %s"),
 				program_invocation_short_name, suspend, devname,
 				ctime(&alarm));
+
+        		syslog (LOG_INFO, "%s: wakeup from %s using at %s",
+				program_invocation_short_name, suspend, devname, ctime(&alarm));
+		}
 		fflush(stdout);
+        	syslog (LOG_INFO, "fflush stdout");
 		xusleep(10 * 1000);
+        	syslog (LOG_INFO, "xusleep 10 * 1000");
 	}
 
 	if (strcmp(suspend, "no") == 0) {
-		if (verbose)
+		if (verbose) {
 			printf(_("suspend mode: no; leaving\n"));
+        		syslog (LOG_INFO, "suspend mode: no; leaving");
+		}
 		dryrun = 1;	/* to skip disabling alarm at the end */
+        	syslog (LOG_INFO, "skip disable alarm at the end");
 
 	} else if (strcmp(suspend, "off") == 0) {
 		char *arg[5];
 		int i = 0;
 
-		if (verbose)
+		if (verbose) {
 			printf(_("suspend mode: off; executing %s\n"),
 						_PATH_SHUTDOWN);
+        		syslog (LOG_INFO, "suspend mode: off executiong %s", _PATH_SHUTDOWN);
+		}
 		arg[i++] = _PATH_SHUTDOWN;
 		arg[i++] = "-h";
 		arg[i++] = "-P";
@@ -583,35 +641,47 @@ int main(int argc, char **argv)
 
 		if (!dryrun) {
 			execv(arg[0], arg);
+        		syslog (LOG_INFO, "arg0: %s", arg[0]);
 
 			warn(_("failed to execute %s"), _PATH_SHUTDOWN);
+        		syslog (LOG_WARNING, "failed to execute: %s", _PATH_SHUTDOWN);
 			rc = EXIT_FAILURE;
 		}
 
 	} else if (strcmp(suspend, "on") == 0) {
+        	syslog (LOG_INFO, "suspend == on");
 		unsigned long data;
 
-		if (verbose)
+		if (verbose) {
 			printf(_("suspend mode: on; reading rtc\n"));
+        		syslog (LOG_INFO, "suspend mode on, reading rtc");
+		}
 
 		if (!dryrun) {
+        		syslog (LOG_INFO, "read");
 			do {
 				t = read(fd, &data, sizeof data);
 				if (t < 0) {
 					warn(_("rtc read failed"));
+        				syslog (LOG_WARNING, "read failed");
 					break;
 				}
-				if (verbose)
+				if (verbose) {
 					printf("... %s: %03lx\n", devname, data);
+        				syslog (LOG_INFO, "... %s: %03lx", devname, data);
+				}
 			} while (!(data & RTC_AF));
 		}
 
 	} else if (strcmp(suspend, "disable") == 0) {
 		/* just break, alarm gets disabled in the end */
-		if (verbose)
+		if (verbose) {
 			printf(_("suspend mode: disable; disabling alarm\n"));
+        		syslog (LOG_INFO, "suspend mode: disable; disable alarm");
+		}
 
 	} else if(strcmp(suspend,"show") == 0) {
+        	syslog (LOG_INFO, "suspend show");
 		if (verbose)
 			printf(_("suspend mode: show; printing alarm info\n"));
 		if (print_alarm(fd))
@@ -619,9 +689,12 @@ int main(int argc, char **argv)
 		dryrun = 1;	/* don't really disable alarm in the end, just show */
 
 	} else {
+        	syslog (LOG_INFO, "else");
 		if (verbose)
 			printf(_("suspend mode: %s; suspending system\n"), suspend);
+        	syslog (LOG_INFO, "sync");
 		sync();
+        	syslog (LOG_INFO, "suspend_system: %s", suspend);
 		suspend_system(suspend);
 	}
 
@@ -635,16 +708,21 @@ int main(int argc, char **argv)
 			if (ioctl(fd, RTC_AIE_OFF, 0) < 0) {
 				warn(_("disable rtc alarm interrupt failed"));
 				rc = EXIT_FAILURE;
+        			syslog (LOG_WARNING, "disable rtc alarm interrupt failed");
 			}
 		} else {
 			wake.enabled = 0;
 			if (ioctl(fd, RTC_WKALM_SET, &wake) < 0) {
 				warn(_("disable rtc alarm interrupt failed"));
 				rc = EXIT_FAILURE;
+        			syslog (LOG_WARNING, "disable rtc alarm interrupt failed");
 			}
 		}
 	}
 
+        syslog (LOG_INFO, "close fd");
 	close(fd);
+        syslog (LOG_INFO, "return rc: %d", rc);
+        syslog (LOG_INFO, "================ end ====================");
 	return rc;
 }
