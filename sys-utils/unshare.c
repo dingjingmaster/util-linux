@@ -149,6 +149,7 @@ static unsigned long parse_propagation(const char *str)
 		{ "unchanged",        0 }
 	};
 
+    printf("opts: %s\n", str);
 	for (i = 0; i < ARRAY_SIZE(opts); i++) {
 		if (strcmp(opts[i].name, str) == 0)
 			return opts[i].flag;
@@ -162,6 +163,7 @@ static void set_propagation(unsigned long flags)
 	if (flags == 0)
 		return;
 
+    printf("flags: %lu\n", flags);
 	if (mount("none", "/", NULL, flags, NULL) != 0)
 		err(EXIT_FAILURE, _("cannot change root filesystem propagation"));
 }
@@ -192,6 +194,7 @@ static int bind_ns_files(pid_t pid)
 			continue;
 
 		snprintf(src, sizeof(src), "/proc/%u/%s", (unsigned) pid, ns->name);
+        printf("%s --> %s\n", src, ns->target);
 
 		if (mount(src, ns->target, NULL, MS_BIND, NULL) != 0)
 			err(EXIT_FAILURE, _("mount %s on %s failed"), src, ns->target);
@@ -205,7 +208,21 @@ static ino_t get_mnt_ino(pid_t pid)
 	struct stat st;
 	char path[PATH_MAX];
 
+    // 表示进程ID所属的 mount namespace。
+    /**
+     * 每一个进程都属于一个独立的 mount namespace，
+     * 在同一个 mount namespace 下的进程可以看到相同的mount点和文件系统试图
+     *
+     * 该文件作用：
+     * 1. 检查进程所属的 mount namespace。这可以帮助了解系统的整体 mount 视图
+     * 2. 通过链接该文件，可以将其它进程加入到此进程的mount namespace中，从而共享相同的文件系统视图
+     * 3. 容器中可以用来了解容器内进程的 namespace
+     *
+     * 如何使用：
+     * 1. stat mnt，获得 inode 号，代表 mount namespace 的唯一标识
+     */
 	snprintf(path, sizeof(path), "/proc/%u/ns/mnt", (unsigned) pid);
+    printf("%s\n", path);
 
 	if (stat(path, &st) != 0)
 		err(EXIT_FAILURE, _("stat of %s failed"), path);
@@ -289,6 +306,15 @@ static pid_t fork_and_wait(int *fd)
 	pid_t pid;
 	uint64_t ch;
 
+    /**
+     * eventfd()，内核提供，创建特殊文件描述符，称为eventfd。
+     *
+     * 主要作用：
+     * 1. 事件通知机制：用于在进程或线程之间传递事件通知信号。一个进程可以通过写入数据到eventfd而触发事件，另一个进程可以读取eventfd来等待事件
+     * 2. 异步I/O事件源：eventfd()创建的文件描述符可以用于epoll、select等异步I/O监控机制的事件源之一。当某个进程向eventfd写入数据时候，它就会触发epoll或select的事件通知
+     * 3. 计数器：eventfd()可以创建一个64为的无符号整数计数器。进程可以通过增加或减少计数器的值来实现简单的事件计数。
+     * 4. 同步原语：可以用作轻量级的同步原语
+     */
 	*fd = eventfd(0, 0);
 	if (*fd < 0)
 		err(EXIT_FAILURE, _("eventfd failed"));
@@ -687,7 +713,7 @@ static void map_ids_internal(const char *type, int ppid, struct map_range *chain
  */
 static pid_t map_ids_from_child(int *fd, uid_t mapuser,
 				struct map_range *usermap, gid_t mapgroup,
-				struct map_range *groupmap)
+                    struct map_range *groupmap)
 {
 	pid_t child, pid = 0;
 	pid_t ppid = getpid();
@@ -907,6 +933,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'm':
 			unshare_flags |= CLONE_NEWNS;
+            // -m 之后没有参数，不会走到这个分支
 			if (optarg)
 				set_ns_target(CLONE_NEWNS, optarg);
 			break;
@@ -1062,33 +1089,61 @@ int main(int argc, char *argv[])
 		}
 	}
 
+    // 0 -p -m -f
+    printf(">>-- 0\n");
+    //   -p -m -f 未执行
 	if ((force_monotonic || force_boottime) && !(unshare_flags & CLONE_NEWTIME))
 		errx(EXIT_FAILURE, _("options --monotonic and --boottime require "
 			"unsharing of a time namespace (-T)"));
 
+    // 1 -p -m -f
+    printf(">>-- 1\n");
 	/* clear any inherited settings */
 	signal(SIGCHLD, SIG_DFL);
 
-	if (npersists && (unshare_flags & CLONE_NEWNS))
-		pid_bind = bind_ns_files_from_child(&fd_bind);
+    //   -p -m -f 未执行
+	if (npersists && (unshare_flags & CLONE_NEWNS)) {
+        printf(">>-- 1 - 1\n");
+        pid_bind = bind_ns_files_from_child(&fd_bind);
+    }
 
-	if (usermap || groupmap)
-		pid_idmap = map_ids_from_child(&fd_idmap, mapuser, usermap,
-					       mapgroup, groupmap);
+    //   -p -m -f 未执行
+	if (usermap || groupmap) {
+        printf(">>-- 1 - 2\n");
+        pid_idmap = map_ids_from_child(&fd_idmap, mapuser, usermap, mapgroup, groupmap);
+    }
 
-	if (-1 == unshare(unshare_flags))
-		err(EXIT_FAILURE, _("unshare failed"));
+    // 2 -p -m -f
+    printf(">>-- 2\n");
+	if (-1 == unshare(unshare_flags)) {
+        printf(">>-- 2 - 1\n");
+        err(EXIT_FAILURE, _("unshare failed"));
+    }
 
+    //   -p -m -f 未执行
+    printf(">>-- 3\n");
 	/* Tell child we've called unshare() */
-	if (usermap || groupmap)
-		sync_with_child(pid_idmap, fd_idmap);
+	if (usermap || groupmap) {
+        printf(">>-- 3 - 1\n");
+        sync_with_child(pid_idmap, fd_idmap);
+    }
 
-	if (force_boottime)
-		settime(boottime, CLOCK_BOOTTIME);
+    //   -p -m -f 未执行
+    printf(">>-- 4\n");
+	if (force_boottime) {
+        printf(">>-- 4 - 1\n");
+        settime(boottime, CLOCK_BOOTTIME);
+    }
 
-	if (force_monotonic)
-		settime(monotonic, CLOCK_MONOTONIC);
+    //   -p -m -f 未执行
+    printf(">>-- 5\n");
+	if (force_monotonic) {
+        printf(">>-- 5 - 1\n");
+        settime(monotonic, CLOCK_MONOTONIC);
+    }
 
+    // 5 -p -m -f
+    printf(">>-- 6\n");
 	if (forkit) {
 		if (sigemptyset(&sigset) != 0 ||
 			sigaddset(&sigset, SIGINT) != 0 ||
@@ -1096,21 +1151,27 @@ int main(int argc, char *argv[])
 			sigprocmask(SIG_BLOCK, &sigset, &oldsigset) != 0)
 			err(EXIT_FAILURE, _("sigprocmask block failed"));
 #ifdef UL_HAVE_PIDFD
+        printf(">>-- 6 - 1\n");
 		if (kill_child_signo != 0) {
+            printf(">>-- 6 - 1 - 1\n");
 			/* make a connection to the original process (parent) */
 			fd_parent_pid = pidfd_open(getpid(), 0);
-			if (0 > fd_parent_pid)
-				err(EXIT_FAILURE, _("pidfd_open failed"));
+			if (0 > fd_parent_pid) {
+                printf(">>-- 6 - 1 - 2\n");
+                err(EXIT_FAILURE, _("pidfd_open failed"));
+            }
 		}
 #endif
 		/* force child forking before mountspace binding so
 		 * pid_for_children is populated */
+        printf(">>-- 6 - 2\n");
 		pid = fork();
-
 		switch(pid) {
 		case -1:
+            printf(">>-- 6 - 2 - 1\n");
 			err(EXIT_FAILURE, _("fork failed"));
 		case 0:	/* child */
+            printf(">>-- 6 - 2 - 2\n");
 			if (sigprocmask(SIG_SETMASK, &oldsigset, NULL))
 				err(EXIT_FAILURE,
 					_("sigprocmask restore failed"));
@@ -1118,26 +1179,41 @@ int main(int argc, char *argv[])
 				close(fd_bind);
 			break;
 		default: /* parent */
+            printf(">>-- 6 - 2 - 3\n");
 			break;
 		}
 	}
 
+    // 7 -p -m -f
+    printf(">>-- 7\n");
 	if (npersists && (pid || !forkit)) {
 		/* run in parent */
-		if (pid_bind && (unshare_flags & CLONE_NEWNS))
-			sync_with_child(pid_bind, fd_bind);
-		else
-			/* simple way, just bind */
-			bind_ns_files(getpid());
+        printf(">>-- 7 - 1\n");
+		if (pid_bind && (unshare_flags & CLONE_NEWNS)) {
+            printf(">>-- 7 - 1 - 1\n");
+            sync_with_child(pid_bind, fd_bind);
+        }
+		else {
+            printf(">>-- 7 - 1 - 2\n");
+            /* simple way, just bind */
+            bind_ns_files(getpid());
+        }
 	}
 
+    printf(">>-- 8\n");
 	if (pid) {
-		if (waitpid(pid, &status, 0) == -1)
-			err(EXIT_FAILURE, _("waitpid failed"));
+        printf(">>-- 8 - 1\n");
+		if (waitpid(pid, &status, 0) == -1) {
+            printf(">>-- 8 - 1 - 1\n");
+            err(EXIT_FAILURE, _("waitpid failed"));
+        }
 
-		if (WIFEXITED(status))
-			return WEXITSTATUS(status);
+		if (WIFEXITED(status)) {
+            printf(">>-- 8 - 2\n");
+            return WEXITSTATUS(status);
+        }
 		if (WIFSIGNALED(status)) {
+            printf(">>-- 8 - 3\n");
 
 			/* Ensure the signal that terminated the child will
 			 * also terminate the parent. */
@@ -1158,7 +1234,9 @@ int main(int argc, char *argv[])
 		err(EXIT_FAILURE, _("child exit failed"));
 	}
 
+    printf(">>-- 9\n");
 	if (kill_child_signo != 0) {
+        printf(">>-- 9 - 1\n");
 		if (prctl(PR_SET_PDEATHSIG, kill_child_signo) < 0)
 			err(EXIT_FAILURE, "prctl failed");
 #ifdef UL_HAVE_PIDFD
@@ -1185,14 +1263,19 @@ int main(int argc, char *argv[])
 #endif
 	}
 
-        if (mapuser != (uid_t) -1 && !usermap)
-		map_id(_PATH_PROC_UIDMAP, mapuser, real_euid);
+    printf(">>-- 10\n");
+        if (mapuser != (uid_t) -1 && !usermap) {
+            printf(">>-- 10 - 1\n");
+            map_id(_PATH_PROC_UIDMAP, mapuser, real_euid);
+        }
 
         /* Since Linux 3.19 unprivileged writing of /proc/self/gid_map
          * has been disabled unless /proc/self/setgroups is written
          * first to permanently disable the ability to call setgroups
          * in that user namespace. */
+    printf(">>-- 11\n");
 	if (mapgroup != (gid_t) -1 && !groupmap) {
+        printf(">>-- 11 - 1\n");
 		if (setgrpcmd == SETGROUPS_ALLOW)
 			errx(EXIT_FAILURE, _("options --setgroups=allow and "
 					"--map-group are mutually exclusive"));
@@ -1200,32 +1283,48 @@ int main(int argc, char *argv[])
 		map_id(_PATH_PROC_GIDMAP, mapgroup, real_egid);
 	}
 
-	if (setgrpcmd != SETGROUPS_NONE)
-		setgroups_control(setgrpcmd);
+    printf(">>-- 12\n");
+	if (setgrpcmd != SETGROUPS_NONE) {
+        printf(">>-- 12 - 1\n");
+        setgroups_control(setgrpcmd);
+    }
 
-	if ((unshare_flags & CLONE_NEWNS) && propagation)
-		set_propagation(propagation);
+    printf(">>-- 13\n");
+	if ((unshare_flags & CLONE_NEWNS) && propagation) {
+        printf(">>-- 13 - 1\n");
+        set_propagation(propagation);
+    }
 
+    printf(">>-- 14\n");
 	if (newinterp && is_fixed(newinterp) && newroot) {
+        printf(">>-- 14 - 1\n");
 		if (mount("binfmt_misc", _PATH_PROC_BINFMT_MISC, "binfmt_misc",
 			  MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL) != 0)
 			err(EXIT_FAILURE, _("mount %s failed"), _PATH_PROC_BINFMT_MISC);
 		load_interp(_PATH_PROC_BINFMT_MISC, newinterp);
 	}
 
+    printf(">>-- 15\n");
 	if (newroot) {
+        printf(">>-- 15 - 1\n");
 		if (chroot(newroot) != 0)
 			err(EXIT_FAILURE,
 			    _("cannot change root directory to '%s'"), newroot);
 		newdir = newdir ?: "/";
 	}
-	if (newdir && chdir(newdir))
-		err(EXIT_FAILURE, _("cannot chdir to '%s'"), newdir);
 
+    printf(">>-- 16\n");
+	if (newdir && chdir(newdir)) {
+        printf(">>-- 16 - 1\n");
+        err(EXIT_FAILURE, _("cannot chdir to '%s'"), newdir);
+    }
+
+    printf(">>-- 17\n");
 	if (procmnt) {
 		/* When not changing root and using the default propagation flags
 		   then the recursive propagation change of root will
 		   automatically change that of an existing proc mount. */
+        printf(">>-- 17 - 1\n");
 		if (!newroot && propagation != (MS_PRIVATE|MS_REC)) {
 			int rc = mount("none", procmnt, NULL, MS_PRIVATE|MS_REC, NULL);
 
@@ -1239,29 +1338,48 @@ int main(int argc, char *argv[])
 			err(EXIT_FAILURE, _("mount %s failed"), procmnt);
 	}
 
+    printf(">>-- 18\n");
 	if (binfmt_mnt) {
+        printf(">>-- 18 - 1\n");
 		if (mount("binfmt_misc", binfmt_mnt, "binfmt_misc",
 			  MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL) != 0)
 			err(EXIT_FAILURE, _("mount %s failed"), binfmt_mnt);
 	}
-	if (newinterp && !(is_fixed(newinterp) && newroot))
-		load_interp(binfmt_mnt, newinterp);
 
+    printf(">>-- 19\n");
+	if (newinterp && !(is_fixed(newinterp) && newroot)) {
+        printf(">>-- 19 - 1\n");
+        load_interp(binfmt_mnt, newinterp);
+    }
+
+    printf(">>-- 20\n");
 	if (force_gid) {
+        printf(">>-- 20 - 1\n");
 		if (setgroups(0, NULL) != 0)	/* drop supplementary groups */
 			err(EXIT_FAILURE, _("setgroups failed"));
 		if (setgid(gid) < 0)		/* change GID */
 			err(EXIT_FAILURE, _("setgid failed"));
 	}
-	if (force_uid && setuid(uid) < 0)	/* change UID */
-		err(EXIT_FAILURE, _("setuid failed"));
 
-	if (keepcaps && (unshare_flags & CLONE_NEWUSER))
-		cap_permitted_to_ambient();
+    printf(">>-- 21\n");
+	if (force_uid && setuid(uid) < 0) {    /* change UID */
+        printf(">>-- 21 - 1\n");
+        err(EXIT_FAILURE, _("setuid failed"));
+    }
 
+    printf(">>-- 22\n");
+	if (keepcaps && (unshare_flags & CLONE_NEWUSER)) {
+        printf(">>-- 22 - 1\n");
+        cap_permitted_to_ambient();
+    }
+
+    printf(">>-- 23\n");
 	if (optind < argc) {
+        printf(">>-- 23 - 1\n");
 		execvp(argv[optind], argv + optind);
 		errexec(argv[optind]);
 	}
+
+    printf(">>-- 24\n");
 	exec_shell();
 }
