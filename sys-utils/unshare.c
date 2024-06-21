@@ -1172,11 +1172,14 @@ int main(int argc, char *argv[])
 			err(EXIT_FAILURE, _("fork failed"));
 		case 0:	/* child */
             printf(">>-- 6 - 2 - 2\n");
-			if (sigprocmask(SIG_SETMASK, &oldsigset, NULL))
-				err(EXIT_FAILURE,
-					_("sigprocmask restore failed"));
-			if (npersists && (unshare_flags & CLONE_NEWNS))
+			if (sigprocmask(SIG_SETMASK, &oldsigset, NULL)) {
+				printf (">>-- 6 - 2 - 2 - 1\n");
+				err(EXIT_FAILURE, _("sigprocmask restore failed"));
+			}
+			if (npersists && (unshare_flags & CLONE_NEWNS)) {
+				printf (">>-- 6 - 2 - 2 - 2\n");
 				close(fd_bind);
+			}
 			break;
 		default: /* parent */
             printf(">>-- 6 - 2 - 3\n");
