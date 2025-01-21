@@ -69,7 +69,7 @@
 #include "list.h"
 #include "blkdev.h"
 
-static const char *default_disks[] = {
+static const char *const default_disks[] = {
 #ifdef __GNU__
 		"/dev/hd0",
 		"/dev/sd0",
@@ -247,10 +247,10 @@ struct cfdisk {
 	struct libmnt_table *fstab;
 	struct libmnt_cache *mntcache;
 #endif
-	unsigned int	wrong_order :1,		/* PT not in right order */
-			zero_start :1,		/* ignore existing partition table */
-			device_is_used : 1,	/* don't use re-read ioctl */
-			show_extra :1;		/* show extra partinfo */
+	bool	wrong_order,	/* PT not in right order */
+		zero_start,	/* ignore existing partition table */
+		device_is_used,	/* don't use re-read ioctl */
+		show_extra;	/* show extra partinfo */
 };
 
 
@@ -1733,6 +1733,8 @@ static int ui_table_goto(struct cfdisk *cf, int where)
 
 	if (where < 0)
 		where = 0;
+	if (!nparts)
+		where = 0;
 	else if ((size_t) where > nparts - 1)
 		where = nparts - 1;
 
@@ -2245,7 +2247,7 @@ done:
 static int ui_help(void)
 {
 	size_t i;
-	static const char *help[] = {
+	static const char *const help[] = {
 		N_("This is cfdisk, a curses-based disk partitioning program."),
 		N_("It lets you create, delete, and modify partitions on a block device."),
 		"  ",
@@ -2729,6 +2731,8 @@ static void __attribute__((__noreturn__)) usage(void)
 	      _("     --lock[=<mode>]      use exclusive device lock (%s, %s or %s)\n"), "yes", "no", "nonblock");
 	fputs(_(" -r, --read-only          forced open cfdisk in read-only mode\n"), out);
 
+	fputs(_(" -b, --sector-size <size> physical and logical sector size\n"), out);
+
 	fputs(USAGE_SEPARATOR, out);
 	fprintf(out, USAGE_HELP_OPTIONS(26));
 
@@ -2741,6 +2745,7 @@ int main(int argc, char *argv[])
 	const char *diskpath = NULL, *lockmode = NULL;
 	int rc, c, colormode = UL_COLORMODE_UNDEF;
 	int read_only = 0;
+	size_t user_ss = 0;
 	struct cfdisk _cf = { .lines_idx = 0 },
 		      *cf = &_cf;
 	enum {
@@ -2750,6 +2755,7 @@ int main(int argc, char *argv[])
 		{ "color",   optional_argument, NULL, 'L' },
 		{ "lock",    optional_argument, NULL, OPT_LOCK },
 		{ "help",    no_argument,       NULL, 'h' },
+		{ "sector-size", required_argument, NULL, 'b' },
 		{ "version", no_argument,       NULL, 'V' },
 		{ "zero",    no_argument,	NULL, 'z' },
 		{ "read-only", no_argument,     NULL, 'r' },
@@ -2761,8 +2767,15 @@ int main(int argc, char *argv[])
 	textdomain(PACKAGE);
 	close_stdout_atexit();
 
-	while((c = getopt_long(argc, argv, "L::hVzr", longopts, NULL)) != -1) {
+	while((c = getopt_long(argc, argv, "b:L::hVzr", longopts, NULL)) != -1) {
 		switch(c) {
+		case 'b':
+			user_ss = strtou32_or_err(optarg,
+					_("invalid sector size argument"));
+			if (user_ss != 512 && user_ss != 1024 &&
+			    user_ss != 2048 && user_ss != 4096)
+				errx(EXIT_FAILURE, _("invalid sector size argument"));
+			break;
 		case 'h':
 			usage();
 			break;
@@ -2801,6 +2814,8 @@ int main(int argc, char *argv[])
 	cf->cxt = fdisk_new_context();
 	if (!cf->cxt)
 		err(EXIT_FAILURE, _("failed to allocate libfdisk context"));
+	if (user_ss)
+		fdisk_save_user_sector_size(cf->cxt, user_ss, user_ss);
 
 	fdisk_set_ask(cf->cxt, ask_callback, (void *) cf);
 

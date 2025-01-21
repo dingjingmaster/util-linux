@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <time.h>
+#include <stdbool.h>
 
 #include "c.h"
 
@@ -58,6 +59,8 @@ extern void strtotimespec_or_err(const char *str, struct timespec *ts,
 		const char *errmesg);
 extern time_t strtotime_or_err(const char *str, const char *errmesg);
 
+extern bool hyperlinkwanted_or_err(const char *mode, const char *errmesg);
+
 extern int isdigit_strend(const char *str, const char **end);
 #define isdigit_string(_s)	isdigit_strend(_s, NULL)
 
@@ -81,15 +84,16 @@ extern char *strnchr(const char *s, size_t maxlen, int c);
 #endif
 
 /* caller guarantees n > 0 */
-static inline void xstrncpy(char *dest, const char *src, size_t n)
+static inline int xstrncpy(char *dest, const char *src, size_t n)
 {
 	size_t len = src ? strlen(src) : 0;
 
 	if (!len)
-		return;
+		return 0;
 	len = min(len, n - 1);
 	memcpy(dest, src, len);
 	dest[len] = 0;
+	return len;
 }
 
 /* This is like strncpy(), but based on memcpy(), so compilers and static
@@ -388,7 +392,7 @@ static inline size_t __normalize_whitespace(
 		else
 			dst[x++] = src[i++];
 	}
-	if (nsp && x > 0)		/* tailing space */
+	if (nsp && x > 0)		/* trailing space */
 		x--;
 done:
 	dst[x] = '\0';
@@ -456,5 +460,6 @@ extern int skip_fline(FILE *fp);
 extern int ul_stralnumcmp(const char *p1, const char *p2);
 
 extern int ul_optstr_next(char **optstr, char **name, size_t *namesz, char **value, size_t *valsz);
+extern int ul_optstr_is_valid(const char *optstr);
 
 #endif

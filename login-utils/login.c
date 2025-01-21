@@ -132,11 +132,11 @@ struct login_context {
 
 	pid_t		pid;
 
-	unsigned int	quiet:1,        /* hush file exists */
-			remote:1,	/* login -h */
-			nohost:1,	/* login -H */
-			noauth:1,	/* login -f */
-			keep_env:1;	/* login -p */
+	bool		quiet,		/* hush file exists */
+			remote,		/* login -h */
+			nohost,		/* login -H */
+			noauth,		/* login -f */
+			keep_env;	/* login -p */
 };
 
 static pid_t child_pid = 0;
@@ -1188,23 +1188,29 @@ static void fork_session(struct login_context *cxt)
 static void init_environ(struct login_context *cxt)
 {
 	struct passwd *pwd = cxt->pwd;
-	char *termenv, **env;
+	struct ul_env_list *saved;
+	char **env;
 	char tmp[PATH_MAX];
 	int len, i;
 
-	termenv = getenv("TERM");
-	if (termenv)
-		termenv = xstrdup(termenv);
+	saved = env_list_add_getenv(NULL, "TERM", "dumb");
 
 	/* destroy environment unless user has requested preservation (-p) */
-	if (!cxt->keep_env)
+	if (!cxt->keep_env) {
+		const char *str = getlogindefs_str("LOGIN_ENV_SAFELIST", NULL);
+
+		saved = env_list_add_getenvs(saved, str);
 		environ = xcalloc(1, sizeof(char *));
+	}
+
+	if (env_list_setenv(saved, 1) != 0)
+		err(EXIT_FAILURE, _("failed to set the environment variables"));
+
+	env_list_free(saved);
 
 	xsetenv("HOME", pwd->pw_dir, 0);	/* legal to override */
 	xsetenv("USER", pwd->pw_name, 1);
 	xsetenv("SHELL", pwd->pw_shell, 1);
-	xsetenv("TERM", termenv ? termenv : "dumb", 1);
-	free(termenv);
 
 	if (pwd->pw_uid) {
 		if (logindefs_setenv("PATH", "ENV_PATH", _PATH_DEFPATH) != 0)
@@ -1487,7 +1493,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	cxt.quiet = get_hushlogin_status(pwd, 1) == 1 ? 1 : 0;
+	cxt.quiet = get_hushlogin_status(pwd, pam_getenv(cxt.pamh, "HOME"), 1) == 1 ? 1 : 0;
 
 	/*
 	 * Open PAM session (after successful authentication and account check).
@@ -1537,8 +1543,9 @@ int main(int argc, char **argv)
 	}
 
 	/* wait until here to change directory! */
-	if (chdir(pwd->pw_dir) < 0) {
-		warn(_("%s: change directory failed"), pwd->pw_dir);
+	const char *home = getenv("HOME") ?: pwd->pw_dir;
+	if (chdir(home) < 0) {
+		warn(_("%s: change directory failed"), home);
 
 		if (!getlogindefs_bool("DEFAULT_HOME", 1))
 			exit(0);

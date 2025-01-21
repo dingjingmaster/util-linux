@@ -105,7 +105,7 @@ static void remove_counters(struct libscols_filter *fltr)
  * scols_unref_filter:
  * @fltr: filter instance
  *
- * Deincrements reference counter, unallocates the filter for the last
+ * Decrements reference counter, unallocates the filter for the last
  * reference.
  *
  * Since: 2.40
@@ -120,7 +120,7 @@ void scols_unref_filter(struct libscols_filter *fltr)
 	}
 }
 
-/* This is generic allocater for a new node, always use the node type specific
+/* This is generic allocator for a new node, always use the node type specific
  * functions (e.g. filter_new_param() */
 struct filter_node *__filter_new_node(enum filter_ntype type, size_t sz)
 {
@@ -270,7 +270,7 @@ int filter_eval_node(struct libscols_filter *fltr, struct libscols_line *ln,
  * @fltr: filter instance
  * @status: return 1 or 0 as result of the expression
  *
- * Applies filter (and also counters assisiated with the filter).
+ * Applies filter (and also counters associated with the filter).
  *
  * Returns: 0, a negative number in case of an error.
  *
@@ -417,7 +417,7 @@ int scols_counter_set_name(struct libscols_counter *ct, const char *name)
  * @name: holder (column) name
  *
  * Assigns a counter to the column. The name is used in the same way as names
- * in the filter expression. This is usable for counter that calcuate with data
+ * in the filter expression. This is usable for counter that calculate with data
  * from table cells (e.g. max, sum, etc.)
  *
  * Returns: 0, a negative number in case of an error.

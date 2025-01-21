@@ -46,10 +46,7 @@
 #include "mountP.h"
 #include "fileutils.h"	/* statx() fallback */
 #include "strutils.h"
-#include "mount-api-utils.h"
 #include "linux_version.h"
-
-#include <inttypes.h>
 
 #ifdef USE_LIBMOUNT_MOUNTFD_SUPPORT
 
@@ -70,8 +67,6 @@ static void save_fd_messages(struct libmnt_context *cxt, int fd)
 	uint8_t buf[BUFSIZ];
 	int rc;
 
-	mnt_context_set_errmsg(cxt, NULL);
-
 	while ((rc = read(fd, buf, sizeof(buf) - 1)) != -1) {
 
 		if (rc == 0)
@@ -82,10 +77,7 @@ static void save_fd_messages(struct libmnt_context *cxt, int fd)
 			buf[rc] = '\0';
 
 		DBG(CXT, ul_debug("message from kernel: \"%*s\"", rc, buf));
-
-		if (rc < 3 || strncmp((char *) buf, "e ", 2) != 0)
-			continue;
-		mnt_context_append_errmsg(cxt, ((char *) buf) + 2);
+		mnt_context_append_mesg(cxt, (char *) buf);
 	}
 }
 
@@ -96,11 +88,12 @@ static void hookset_set_syscall_status(struct libmnt_context *cxt,
 
 	mnt_context_syscall_save_status(cxt, name, x);
 
-	if (!x) {
-		api = get_sysapi(cxt);
-		if (api && api->fd_fs >= 0)
-			save_fd_messages(cxt, api->fd_fs);
-	}
+	if (!x)
+		mnt_context_reset_mesgs(cxt);	/* reset om error */
+
+	api = get_sysapi(cxt);
+	if (api && api->fd_fs >= 0)
+		save_fd_messages(cxt, api->fd_fs);
 }
 
 /*
@@ -214,6 +207,10 @@ static int configure_superblock(struct libmnt_context *cxt,
 		const int is_linux = ent && mnt_opt_get_map(opt) == cxt->map_linux;
 
 		if (is_linux && ent->id == MS_RDONLY) {
+			/* ignore if specified as "ro=vfs" */
+			if (mnt_opt_value_with(opt, "vfs")
+			    && !mnt_opt_value_with(opt, "fs"))
+				continue;
 			/* Use ro/rw for superblock (for backward compatibility) */
 			value = NULL;
 			has_rwro = 1;
@@ -364,7 +361,7 @@ static int hook_reconfigure_mount(struct libmnt_context *cxt,
 
 	rc = configure_superblock(cxt, hs, api->fd_fs, 1);
 	if (!rc) {
-		DBG(HOOK, ul_debugobj(hs, "re-configurate FS"));
+		DBG(HOOK, ul_debugobj(hs, "reconfigure FS"));
 		rc = fsconfig(api->fd_fs, FSCONFIG_CMD_RECONFIGURE, NULL, NULL, 0);
 		hookset_set_syscall_status(cxt, "fsconfig", rc == 0);
 	}

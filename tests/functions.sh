@@ -168,7 +168,7 @@ function ts_skip_nonroot {
 #	ts_skip_capability cap_wake_alarm
 #
 function ts_skip_capability {
-	ts_check_prog "$TS_HELPER_CAP"
+	ts_check_test_command "$TS_HELPER_CAP"
 
 	if ! "$TS_HELPER_CAP" "$1"; then
 		ts_skip "no capability: $1"
@@ -1194,4 +1194,10 @@ function ts_check_enosys_syscalls {
 
 function ts_skip_docker {
 	test -e /.dockerenv && ts_skip "unsupported in docker environment"
+}
+
+function ts_check_ipv6 {
+       if [ ! -e /proc/net/if_inet6 ]; then
+               ts_skip "IPv6 is not supported"
+       fi
 }

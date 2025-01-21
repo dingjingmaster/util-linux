@@ -1,5 +1,5 @@
 
-# libmount.h is generated, so it's store in builddir!
+# libmount.h is generated, so it's stored in builddir!
 mountincdir = $(includedir)/libmount
 nodist_mountinc_HEADERS = libmount/src/libmount.h
 
@@ -11,6 +11,7 @@ libmount_la_SOURCES = \
 	libmount/src/mountP.h \
 	libmount/src/cache.c \
 	libmount/src/fs.c \
+	libmount/src/fs_statmount.c \
 	libmount/src/init.c \
 	libmount/src/iter.c \
 	libmount/src/lock.c \
@@ -19,6 +20,7 @@ libmount_la_SOURCES = \
 	libmount/src/optstr.c \
 	libmount/src/tab.c \
 	libmount/src/tab_diff.c \
+	libmount/src/tab_listmount.c \
 	libmount/src/tab_parse.c \
 	libmount/src/tab_update.c \
 	libmount/src/test.c \

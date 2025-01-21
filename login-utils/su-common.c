@@ -144,25 +144,24 @@ struct su_context {
 	pid_t		child;			/* fork() baby */
 	int		childstatus;		/* wait() status */
 
-	char		**env_whitelist_names;	/* environment whitelist */
-	char		**env_whitelist_vals;
+	struct ul_env_list *env_whitelist;	/* environment whitelist */
 
 	struct sigaction oldact[SIGNALS_IDX_COUNT];	/* original sigactions indexed by SIG*_IDX */
 #ifdef USE_PTY
 	struct ul_pty	*pty;			/* pseudo terminal handler (for --pty) */
 #endif
-	unsigned int runuser :1,		/* flase=su, true=runuser */
-		     runuser_uopt :1,		/* runuser -u specified */
-		     isterm :1,			/* is stdin terminal? */
-		     fast_startup :1,		/* pass the `-f' option to the subshell. */
-		     simulate_login :1,		/* simulate a login instead of just starting a shell. */
-		     change_environment :1,	/* change some environment vars to indicate the user su'd to.*/
-		     same_session :1,		/* don't call setsid() with a command. */
-		     suppress_pam_info:1,	/* don't print PAM info messages (Last login, etc.). */
-		     pam_has_session :1,	/* PAM session opened */
-		     pam_has_cred :1,		/* PAM cred established */
-		     force_pty :1,		/* create pseudo-terminal */
-		     restricted :1;		/* false for root user */
+	bool		runuser,		/* flase=su, true=runuser */
+			runuser_uopt,		/* runuser -u specified */
+			isterm,			/* is stdin terminal? */
+			fast_startup,		/* pass the `-f' option to the subshell. */
+			simulate_login,		/* simulate a login instead of just starting a shell. */
+			change_environment,	/* change some environment vars to indicate the user su'd to.*/
+			same_session,		/* don't call setsid() with a command. */
+			suppress_pam_info,	/* don't print PAM info messages (Last login, etc.). */
+			pam_has_session,	/* PAM session opened */
+			pam_has_cred,		/* PAM cred established */
+			force_pty,		/* create pseudo-terminal */
+			restricted;		/* false for root user */
 };
 
 
@@ -383,6 +382,7 @@ static void supam_export_environment(struct su_context *su)
 static void supam_authenticate(struct su_context *su)
 {
 	const char *srvname = NULL;
+	const char *pam_user = NULL;
 	int rc;
 
 	srvname = su->runuser ?
@@ -423,6 +423,18 @@ static void supam_authenticate(struct su_context *su)
 	rc = pam_acct_mgmt(su->pamh, 0);
 	if (rc == PAM_NEW_AUTHTOK_REQD)
 		rc = pam_chauthtok(su->pamh, PAM_CHANGE_EXPIRED_AUTHTOK);
+	if (is_pam_failure(rc))
+		goto done;
+
+	rc = pam_get_item(su->pamh, PAM_USER, (const void **) &pam_user);
+	if (is_pam_failure(rc))
+		goto done;
+
+	if (pam_user == NULL || strcmp(pam_user, su->pwd->pw_name) != 0) {
+		rc = PAM_USER_UNKNOWN;
+		goto done;
+	}
+
  done:
 	log_syslog(su, !is_pam_failure(rc));
 
@@ -663,56 +675,6 @@ static void create_watching_parent(struct su_context *su)
 	exit(status);
 }
 
-/* Adds @name from the current environment to the whitelist. If @name is not
- * set then nothing is added to the whitelist and returns 1.
- */
-static int env_whitelist_add(struct su_context *su, const char *name)
-{
-	const char *env = getenv(name);
-
-	if (!env)
-		return 1;
-	if (strv_extend(&su->env_whitelist_names, name))
-                err_oom();
-	if (strv_extend(&su->env_whitelist_vals, env))
-                err_oom();
-	return 0;
-}
-
-static int env_whitelist_setenv(struct su_context *su, int overwrite)
-{
-	char **one;
-	size_t i = 0;
-	int rc;
-
-	STRV_FOREACH(one, su->env_whitelist_names) {
-		rc = setenv(*one, su->env_whitelist_vals[i], overwrite);
-		if (rc)
-			return rc;
-		i++;
-	}
-
-	return 0;
-}
-
-/* Creates (add to) whitelist from comma delimited string */
-static int env_whitelist_from_string(struct su_context *su, const char *str)
-{
-	char **all = strv_split(str, ",");
-	char **one;
-
-	if (!all) {
-		if (errno == ENOMEM)
-			err_oom();
-		return -EINVAL;
-	}
-
-	STRV_FOREACH(one, all)
-		env_whitelist_add(su, *one);
-	strv_free(all);
-	return 0;
-}
-
 static void setenv_path(const struct passwd *pw)
 {
 	int rc;
@@ -743,7 +705,7 @@ static void modify_environment(struct su_context *su, const char *shell)
 	 */
 	if (su->simulate_login) {
 		/* leave TERM unchanged */
-		env_whitelist_add(su, "TERM");
+		su->env_whitelist = env_list_add_getenv(su->env_whitelist, "TERM", NULL);
 
 		/* Note that original su(1) has allocated environ[] by malloc
 		 * to the number of expected variables. This seems unnecessary
@@ -768,7 +730,8 @@ static void modify_environment(struct su_context *su, const char *shell)
 		xsetenv("LOGNAME", pw->pw_name, 1);
 
 		/* apply all from whitelist, but no overwrite */
-		env_whitelist_setenv(su, 0);
+		if (env_list_setenv(su->env_whitelist, 0) != 0)
+			err(EXIT_FAILURE, _("failed to set environment variables"));
 
 	/* Set HOME, SHELL, and (if not becoming a superuser) USER and LOGNAME.
 	 */
@@ -787,6 +750,9 @@ static void modify_environment(struct su_context *su, const char *shell)
 	}
 
 	supam_export_environment(su);
+
+	env_list_free(su->env_whitelist);
+	su->env_whitelist = NULL;
 }
 
 static void init_groups(struct su_context *su, gid_t *groups, size_t ngroups)
@@ -1123,7 +1089,7 @@ int su_main(int argc, char **argv, int mode)
 			break;
 
 		case 'w':
-			env_whitelist_from_string(su, optarg);
+			su->env_whitelist = env_list_add_getenvs(su->env_whitelist, optarg);
 			break;
 
 		case 'P':

@@ -45,6 +45,7 @@
 #include <sys/wait.h>
 
 #include "mount-api-utils.h"
+#include "strv.h"
 
 /**
  * mnt_new_context:
@@ -506,11 +507,43 @@ int mnt_context_disable_canonicalize(struct libmnt_context *cxt, int disable)
  * mnt_context_is_nocanonicalize:
  * @cxt: mount context
  *
- * Returns: 1 if no-canonicalize mode is enabled or 0.
+ * Returns: 1 if no-canonicalize mode (on [u]mount command line) is enabled or 0.
  */
 int mnt_context_is_nocanonicalize(struct libmnt_context *cxt)
 {
 	return cxt->flags & MNT_FL_NOCANONICALIZE ? 1 : 0;
+}
+
+
+/*
+ * Returns 1 if "x-mount.nocanonicalize[=<type>]" userspace mount option is
+ * specified. The optional arguments 'type' should be "source" or "target".
+ */
+int mnt_context_is_xnocanonicalize(
+			struct libmnt_context *cxt,
+			const char *type)
+{
+	struct libmnt_optlist *ol;
+	struct libmnt_opt *opt;
+	const char *arg;
+
+	assert(cxt);
+	assert(type);
+
+	if (mnt_context_is_nocanonicalize(cxt))
+		return 1;
+
+	ol = mnt_context_get_optlist(cxt);
+	if (!ol)
+		return 0;
+	opt = mnt_optlist_get_named(ol,	"X-mount.nocanonicalize",
+			cxt->map_userspace);
+	if (!opt)
+		return 0;
+	arg = mnt_opt_get_value(opt);
+	if (!arg)
+		return 1;
+	return strcmp(arg, type) == 0;
 }
 
 /**
@@ -1146,8 +1179,8 @@ fail:
  * @cxt: mount context
  * @optstr: comma delimited mount options
  *
- * Note that MS_MOVE cannot be specified as "string". It's operation that
- * is no supported in fstab (etc.)
+ * Please note that MS_MOVE cannot be specified as a "string". The move operation
+ * cannot be specified in fstab.
  *
  * Returns: 0 on success, negative number in case of error.
  */
@@ -1815,12 +1848,18 @@ int mnt_context_open_tree(struct libmnt_context *cxt, const char *path, unsigned
 	if ((mflg & MS_BIND) && !(mflg & MS_REMOUNT)) {
 		oflg |= OPEN_TREE_CLONE;
 
+		/* AT_RECURSIVE is only permitted for OPEN_TREE_CLONE (rbind).
+		 * The other recursive operations are handled by
+		 * mount_setattr() and are independent of open_tree() */
 		if (mnt_optlist_is_rbind(cxt->optlist))
 			oflg |= AT_RECURSIVE;
 	}
 
 	if (cxt->force_clone)
 		oflg |= OPEN_TREE_CLONE;
+
+	if (mnt_context_is_xnocanonicalize(cxt, "source"))
+		oflg |= AT_SYMLINK_NOFOLLOW;
 
 	DBG(CXT, ul_debugobj(cxt, "open_tree(path=%s%s%s)", path,
 				oflg & OPEN_TREE_CLONE ? " clone" : "",
@@ -1884,7 +1923,8 @@ int mnt_context_prepare_srcpath(struct libmnt_context *cxt)
 
 		rc = path ? mnt_fs_set_source(cxt->fs, path) : -MNT_ERR_NOSOURCE;
 
-	} else if (cache && !mnt_fs_is_pseudofs(cxt->fs)) {
+	} else if (cache && !mnt_fs_is_pseudofs(cxt->fs)
+			 && !mnt_context_is_xnocanonicalize(cxt, "source")) {
 		/*
 		 * Source is PATH (canonicalize)
 		 */
@@ -2677,54 +2717,73 @@ void mnt_context_syscall_reset_status(struct libmnt_context *cxt)
 	cxt->syscall_status = 0;
 	cxt->syscall_name = NULL;
 
-	free(cxt->errmsg);
-	cxt->errmsg = NULL;
+	mnt_context_reset_mesgs(cxt);
 }
 
-int mnt_context_set_errmsg(struct libmnt_context *cxt, const char *msg)
+void mnt_context_reset_mesgs(struct libmnt_context *cxt)
 {
-	char *p = NULL;
-
-	if (msg) {
-		p = strdup(msg);
-		if (!p)
-			return -ENOMEM;
-	}
-
-	free(cxt->errmsg);
-	cxt->errmsg = p;
-
-	return 0;
+	DBG(CXT, ul_debug("reset messages"));
+	strv_free(cxt->mesgs);
+	cxt->mesgs = NULL;
 }
 
-int mnt_context_append_errmsg(struct libmnt_context *cxt, const char *msg)
+int mnt_context_append_mesg(struct libmnt_context *cxt, const char *msg)
 {
-	if (cxt->errmsg) {
-		int rc = strappend(&cxt->errmsg, "; ");
-		if (rc)
-			return rc;
-	}
-
-	return strappend(&cxt->errmsg, msg);
+	return strv_extend(&cxt->mesgs, msg);
 }
 
-int mnt_context_sprintf_errmsg(struct libmnt_context *cxt, const char *msg, ...)
+int mnt_context_sprintf_mesg(struct libmnt_context *cxt, const char *msg, ...)
 {
 	int rc;
 	va_list ap;
-	char *p = NULL;
 
 	va_start(ap, msg);
-	rc = vasprintf(&p, msg, ap);
+	rc = strv_extendv(&cxt->mesgs, msg, ap);
 	va_end(ap);
 
-	if (rc < 0 || !p)
-		return rc;
+	return rc;
+}
 
-	free(cxt->errmsg);
-	cxt->errmsg = p;
+/**
+ * mnt_context_get_nmesgs:
+ * @cxt: mount context
+ * @type: type of message (see fsopen() man page) or zero for all types
+ *
+ * Returns: number of messages
+ *
+ * Since: 2.41
+ */
+size_t mnt_context_get_nmesgs(struct libmnt_context *cxt, char type)
+{
+	size_t n;
+	char **s;
 
-	return 0;
+	if (!cxt || !cxt->mesgs)
+		return 0;
+
+	n = strv_length(cxt->mesgs);
+	if (n && type) {
+		n = 0;
+		STRV_FOREACH(s, cxt->mesgs) {
+			if (*s && **s == type)
+				n++;
+		}
+	}
+
+	return n;
+}
+
+/**
+ * mnt_context_get_mesgs:
+ * @cxt: mount context
+ *
+ * Returns: NULL terminated array of messages or NULL
+ *
+ * Since: 2.41
+ */
+char **mnt_context_get_mesgs(struct libmnt_context *cxt)
+{
+	return cxt ? cxt->mesgs : NULL;
 }
 
 /**

@@ -171,15 +171,6 @@ static struct timeval t2tv(time_t timet)
 }
 
 /*
- * The difference in seconds between two times in "timeval" format.
- */
-double time_diff(struct timeval subtrahend, struct timeval subtractor)
-{
-	return (subtrahend.tv_sec - subtractor.tv_sec)
-	    + (subtrahend.tv_usec - subtractor.tv_usec) / 1E6;
-}
-
-/*
  * The time, in "timeval" format, which is <increment> seconds after the
  * time <addend>. Of course, <increment> may be negative.
  */
@@ -572,8 +563,8 @@ set_hardware_clock_exact(const struct hwclock_control *ctl,
 		ON_DBG(RANDOM_SLEEP, up_to_1000ms_sleep());
 
 		gettimeofday(&nowsystime, NULL);
-		deltavstarget = time_diff(nowsystime, targetsystime);
-		ticksize = time_diff(nowsystime, prevsystime);
+		deltavstarget = time_diff(&nowsystime, &targetsystime);
+		ticksize = time_diff(&nowsystime, &prevsystime);
 		prevsystime = nowsystime;
 
 		if (ticksize < 0) {
@@ -624,7 +615,7 @@ set_hardware_clock_exact(const struct hwclock_control *ctl,
 	}
 
 	newhwtime = sethwtime
-		    + round(time_diff(nowsystime, refsystime)
+		    + round(time_diff(&nowsystime, &refsystime)
 			    - delay /* don't count this */);
 	if (ctl->verbose)
 		printf(_("%"PRId64".%06"PRId64" is close enough to %"PRId64".%06"PRId64" (%.6f < %.6f)\n"
@@ -821,8 +812,8 @@ adjust_drift_factor(const struct hwclock_control *ctl,
 		 * hclocktime is fully corrected with the current drift factor.
 		 * Its difference from nowtime is the missed drift correction.
 		 */
-		factor_adjust = time_diff(nowtime, hclocktime) /
-				(time_diff(nowtime, last_calib) / sec_per_day);
+		factor_adjust = time_diff(&nowtime, &hclocktime) /
+				(time_diff(&nowtime, &last_calib) / sec_per_day);
 
 		drift_factor = adjtime_p->drift_factor + factor_adjust;
 		if (fabs(drift_factor) > MAX_DRIFT) {
@@ -838,8 +829,8 @@ adjust_drift_factor(const struct hwclock_control *ctl,
 					 "%f seconds\nin spite of a drift factor of "
 					 "%f seconds/day.\n"
 					 "Adjusting drift factor by %f seconds/day\n"),
-				       time_diff(nowtime, hclocktime),
-				       time_diff(nowtime, last_calib),
+				       time_diff(&nowtime, &hclocktime),
+				       time_diff(&nowtime, &last_calib),
 				       adjtime_p->drift_factor, factor_adjust);
 		}
 
@@ -898,6 +889,7 @@ static int save_adjtime(const struct hwclock_control *ctl,
 {
 	char *content;		/* Stuff to write to disk file */
 	FILE *fp;
+	int rc = EXIT_FAILURE;
 
 	xasprintf(&content, "%f %"PRId64" %f\n%"PRId64"\n%s\n",
 		  adjtime->drift_factor,
@@ -917,7 +909,7 @@ static int save_adjtime(const struct hwclock_control *ctl,
 		fp = fopen(ctl->adj_file_name, "w");
 		if (fp == NULL) {
 			warn(_("cannot open %s"), ctl->adj_file_name);
-			return EXIT_FAILURE;
+			goto done;
 		}
 
 		rc = fputs(content, fp) < 0;
@@ -925,10 +917,14 @@ static int save_adjtime(const struct hwclock_control *ctl,
 
 		if (rc) {
 			warn(_("cannot update %s"), ctl->adj_file_name);
-			return EXIT_FAILURE;
+			goto done;
 		}
 	}
-	return EXIT_SUCCESS;
+
+	rc = EXIT_SUCCESS;
+done:
+	free(content);
+	return rc;
 }
 
 /*
@@ -984,7 +980,7 @@ static void determine_clock_access_method(const struct hwclock_control *ctl)
 	if (ctl->directisa)
 		ur = probe_for_cmos_clock();
 #endif
-#ifdef __linux__
+#if defined(__linux__) || defined(__GNU__)
 	if (!ur)
 		ur = probe_for_rtc_clock(ctl);
 #endif
@@ -1096,7 +1092,7 @@ manipulate_clock(const struct hwclock_control *ctl, const time_t set_time,
 			hclocktime = time_inc(tdrift, hclocktime.tv_sec);
 
 		startup_hclocktime =
-		 time_inc(hclocktime, time_diff(startup_time, read_time));
+		 time_inc(hclocktime, time_diff(&startup_time, &read_time));
 	}
 	if (ctl->show || ctl->get) {
 		return display_time(startup_hclocktime);
@@ -1236,6 +1232,7 @@ usage(void)
 #ifdef __linux__
 	puts(_("     --param-get <param>         display the RTC parameter"));
 	puts(_("     --param-set <param>=<value> set the RTC parameter"));
+	puts(_("     --param-index <number>      parameter index (default 0)"));
 	puts(_("     --vl-read                   read voltage low information"));
 	puts(_("     --vl-clear                  clear voltage low information"));
 #endif
@@ -1309,6 +1306,7 @@ int main(int argc, char **argv)
 		OPT_NOADJFILE,
 		OPT_PARAM_GET,
 		OPT_PARAM_SET,
+		OPT_PARAM_IDX,
 		OPT_VL_READ,
 		OPT_VL_CLEAR,
 		OPT_PREDICT,
@@ -1340,6 +1338,7 @@ int main(int argc, char **argv)
 #ifdef __linux__
 		{ "param-get",    required_argument, NULL, OPT_PARAM_GET  },
 		{ "param-set",    required_argument, NULL, OPT_PARAM_SET  },
+		{ "param-index",  required_argument, NULL, OPT_PARAM_IDX  },
 		{ "vl-read",      no_argument,       NULL, OPT_VL_READ    },
 		{ "vl-clear",     no_argument,       NULL, OPT_VL_CLEAR   },
 #endif
@@ -1465,6 +1464,9 @@ int main(int argc, char **argv)
 			ctl.param_set_option = optarg;
 			ctl.show = 0;
 			ctl.hwaudit_on = 1;
+			break;
+		case OPT_PARAM_IDX:
+			ctl.param_idx = strtou32_or_err(optarg, _("failed to parse param-index"));
 			break;
 		case OPT_VL_READ:
 			ctl.vl_read = 1;

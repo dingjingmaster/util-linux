@@ -65,18 +65,36 @@ option('build-zramctl', type : 'feature',
        description : 'build zramctl')
 option('build-lsns', type : 'feature',
        description : 'build lsns')
+option('build-mkfs', type : 'feature',
+       description : 'build mkfs')
 option('build-fsck', type : 'feature',
        description : 'build fsck')
 option('build-partx', type : 'feature',
        description : 'build addpart, delpart, partx')
 option('build-script', type : 'feature',
        description : 'build script')
-option('build-scriptlive', type : 'feature',
-       description : 'build scriptlive')
+option('build-scriptutils', type : 'feature',
+       description : 'build scriptutils')
+option('build-bits', type : 'feature',
+       description : 'build bits')
+option('build-col', type : 'feature',
+       description : 'build col')
+option('build-colcrt', type : 'feature',
+       description : 'build colcrt')
+option('build-colrm', type : 'feature',
+       description : 'build colrm')
+option('build-rev', type : 'feature',
+       description : 'build rev')
 
 option('build-uuidd', type : 'feature',
        description : 'build the uuid daemon')
 
+option('build-choom', type : 'feature',
+       description : 'build choom')
+option('build-isosize', type : 'feature',
+       description : 'build isosize')
+option('build-waitpid', type : 'feature',
+       description : 'build waitpid')
 option('build-wipefs', type : 'feature',
        description : 'build wipefs')
 option('build-mountpoint', type : 'feature',
@@ -115,6 +133,14 @@ option('build-cal', type : 'feature',
        description : 'build cal')
 option('build-logger', type : 'feature',
        description : 'build logger')
+option('build-look', type : 'feature',
+       description : 'build look')
+option('build-mcookie', type : 'feature',
+       description : 'build mcookie')
+option('build-namei', type : 'feature',
+       description : 'build namei')
+option('build-whereis', type : 'feature',
+       description : 'build whereis')
 option('build-lsblk', type : 'feature',
        description : 'build lsblk')
 option('build-lslocks', type : 'feature',
@@ -127,6 +153,8 @@ option('build-switch_root', type : 'feature',
        description : 'switch_root')
 option('build-pivot_root', type : 'feature',
        description : 'build pivot_root')
+option('build-flock', type : 'feature',
+       description : 'build flock')
 option('build-lsmem', type : 'feature',
        description : 'build lsmem')
 option('build-lsirq', type : 'feature',
@@ -149,6 +177,10 @@ option('build-fstrim', type : 'feature',
        description : 'build fstrim')
 option('build-dmesg', type : 'feature',
        description : 'build dmesg')
+option('build-ctrlaltdel', type : 'feature',
+       description : 'build ctrlaltdel')
+option('build-exch', type : 'feature',
+       description : 'build exch')
 option('build-fsfreeze', type : 'feature',
        description : 'build fsfreeze')
 option('build-blkdiscard', type : 'feature',
@@ -207,6 +239,8 @@ option('build-enosys', type : 'feature',
        description : 'build enosys')
 option('build-lsclocks', type : 'feature',
        description : 'build lsclocks')
+option('build-getopt', type : 'feature',
+       description : 'build getopt')
 option('build-setterm', type : 'feature',
        description : 'build setterm')
 option('build-schedutils', type : 'feature',
@@ -219,6 +253,10 @@ option('build-bash-completion', type : 'feature',
        description : 'install bash completion files')
 option('build-pylibmount', type : 'feature',
        description : 'build pylibmount')
+option('build-hexdump', type : 'feature',
+       description : 'build hexdump')
+option('build-findfs', type : 'feature',
+       description : 'build findfs')
 
 # static programs
 
@@ -269,9 +307,10 @@ option('vendordir',
 
 option('pamlibdir', type : 'string',
        description : 'directory for PAM modules')
-option('lastlog-compat-symlink', type : 'boolean',
-       value : false,
-       description : 'create lastlog compat symlink')
 option('login-lastlogin', type : 'boolean',
        value : false,
        description : 'program login writes lastlog entries')
+
+option('tty-setgid', type : 'boolean',
+       value : true,
+       description : 'setgid tty group for wall and write programs')

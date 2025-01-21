@@ -22,7 +22,6 @@
  * along with this program; if not, write to the Free Software Foundation,
  * Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-
 #include <stdio.h>
 #include <sys/types.h>
 #include <inttypes.h>
@@ -40,6 +39,27 @@
 
 #ifdef HAVE_LINUX_KCMP_H
 #  include <linux/kcmp.h>
+#endif
+
+/* See proc(5).
+ * Defined in linux/include/linux/sched.h private header file. */
+#define PF_KTHREAD		0x00200000	/* I am a kernel thread */
+
+#include "c.h"
+#include "list.h"
+#include "closestream.h"
+#include "column-list-table.h"
+#include "strutils.h"
+#include "procfs.h"
+#include "fileutils.h"
+#include "idcache.h"
+#include "pathnames.h"
+
+#include "lsfd.h"
+
+/* Make sure this ifdef block comes after all the includes since
+ * c.h is required for the case where the system does not have kcmp.h */
+#ifdef HAVE_LINUX_KCMP_H
 static int kcmp(pid_t pid1, pid_t pid2, int type,
 		unsigned long idx1, unsigned long idx2)
 {
@@ -67,22 +87,6 @@ static int kcmp(pid_t pid1 __attribute__((__unused__)),
 	return -1;
 }
 #endif
-
-/* See proc(5).
- * Defined in linux/include/linux/sched.h private header file. */
-#define PF_KTHREAD		0x00200000	/* I am a kernel thread */
-
-#include "c.h"
-#include "list.h"
-#include "closestream.h"
-#include "column-list-table.h"
-#include "strutils.h"
-#include "procfs.h"
-#include "fileutils.h"
-#include "idcache.h"
-#include "pathnames.h"
-
-#include "lsfd.h"
 
 UL_DEBUG_DEFINE_MASK(lsfd);
 UL_DEBUG_DEFINE_MASKNAMES(lsfd) = UL_DEBUG_EMPTY_MASKNAMES;
@@ -194,6 +198,9 @@ static const struct colinfo infos[] = {
 	[COL_BPF_PROG_ID]      = { "BPF-PROG.ID",
 				   0,   SCOLS_FL_RIGHT, SCOLS_JSON_NUMBER,
 				   N_("bpf program id associated with the fd") },
+	[COL_BPF_PROG_TAG]     = { "BPF-PROG.TAG",
+				   0,   SCOLS_FL_RIGHT, SCOLS_JSON_STRING,
+				   N_("bpf program tag") },
 	[COL_BPF_PROG_TYPE]    = { "BPF-PROG.TYPE",
 				   0,   SCOLS_FL_RIGHT, SCOLS_JSON_STRING,
 				   N_("bpf program type (decoded)") },
@@ -428,6 +435,24 @@ static const struct colinfo infos[] = {
 	[COL_USER]             = { "USER",
 				   0,   SCOLS_FL_RIGHT, SCOLS_JSON_STRING,
 				   N_("user of the process") },
+	[COL_VSOCK_LCID]       = { "VSOCK.LCID",
+				    0,   SCOLS_FL_RIGHT, SCOLS_JSON_NUMBER,
+				    N_("local VSOCK context identifier") },
+	[COL_VSOCK_RCID]       = { "VSOCK.RCID",
+				    0,   SCOLS_FL_RIGHT, SCOLS_JSON_NUMBER,
+				    N_("remote VSOCK context identifier") },
+	[COL_VSOCK_LPORT]      = { "VSOCK.LPORT",
+				    0,   SCOLS_FL_RIGHT, SCOLS_JSON_NUMBER,
+				    N_("local VSOCK port") },
+	[COL_VSOCK_RPORT]      = { "VSOCK.RPORT",
+				    0,   SCOLS_FL_RIGHT, SCOLS_JSON_NUMBER,
+				    N_("remote VSOCK port") },
+	[COL_VSOCK_LADDR]       = { "VSOCK.LADDR",
+				    0,   SCOLS_FL_RIGHT, SCOLS_JSON_STRING,
+				    N_("local VSOCK address (CID:PORT)") },
+	[COL_VSOCK_RADDR]       = { "VSOCK.RADDR",
+				    0,   SCOLS_FL_RIGHT, SCOLS_JSON_STRING,
+				    N_("remote VSOCK address (CID:PORT)") },
 	[COL_XMODE]            = { "XMODE",
 				   0,   SCOLS_FL_RIGHT, SCOLS_JSON_STRING,
 				   N_("extended version of MODE (rwxD[Ll]m)") },
@@ -540,6 +565,7 @@ static const struct counter_spec default_counter_specs[] = {
 struct filler_data {
 	struct proc *proc;
 	struct file *file;
+	const char *uri;
 };
 
 struct lsfd_control {
@@ -555,6 +581,8 @@ struct lsfd_control {
 			show_summary : 1,	/* print summary/counters */
 			sockets_only : 1,	/* display only SOCKETS */
 			show_xmode : 1;		/* XMODE column is enabled. */
+
+	char *uri;
 
 	struct libscols_filter *filter;		/* filter */
 	struct libscols_filter **ct_filters;	/* counters (NULL terminated array) */
@@ -599,18 +627,23 @@ static int get_column_id(int num)
 	return columns[num];
 }
 
-static const struct colinfo *get_column_info(int num)
+static const struct colinfo *get_column_info(int id)
 {
-	return &infos[ get_column_id(num) ];
+	return &infos[ id ];
 }
 
 static struct libscols_column *add_column(struct libscols_table *tb,
-					  const struct colinfo *col, int extra)
+					  int id, int extra, char *uri)
 {
+	const struct colinfo *col;
 	struct libscols_column *cl;
-	int flags = col->flags;
 
-	cl = scols_table_new_column(tb, col->name, col->whint, flags | extra);
+	assert(id < LSFD_N_COLS);
+
+	col = get_column_info(id);
+
+	cl = scols_table_new_column(tb, col->name, col->whint,
+				col->flags | extra);
 	if (cl) {
 		scols_column_set_json_type(cl, col->json_type);
 		if (col->flags & SCOLS_FL_WRAP) {
@@ -620,22 +653,23 @@ static struct libscols_column *add_column(struct libscols_table *tb,
 						  NULL);
 			scols_column_set_safechars(cl, "\n");
 		}
+		if (!(extra & SCOLS_FL_HIDDEN) && uri &&
+		    (id == COL_NAME || id == COL_KNAME))
+			scols_column_set_uri(cl, uri);
 	}
 
 	return cl;
 }
 
-static struct libscols_column *add_column_by_id(struct lsfd_control *ctl,
-						int colid, int extra)
+static struct libscols_column *add_hidden_column(struct lsfd_control *ctl,
+						 int colid)
 {
 	struct libscols_column *cl;
 
 	if (ncolumns >= ARRAY_SIZE(columns))
 		errx(EXIT_FAILURE, _("too many columns are added via filter expression"));
 
-	assert(colid < LSFD_N_COLS);
-
-	cl = add_column(ctl->tb, infos + colid, extra);
+	cl = add_column(ctl->tb, colid, SCOLS_FL_HIDDEN, ctl->uri);
 	if (!cl)
 		err(EXIT_FAILURE, _("failed to allocate output column"));
 	columns[ncolumns++] = colid;
@@ -849,9 +883,10 @@ static struct file *collect_file_symlink(struct path_cxt *pc,
 	 */
 	else if ((prev = list_last_entry(&proc->files, struct file, files))
 		 && (!prev->is_error)
-		 && prev->name && strcmp(prev->name, sym) == 0)
+		 && prev->name && strcmp(prev->name, sym) == 0) {
 		f = copy_file(prev, assoc);
-	else if (ul_path_stat(pc, &sb, 0, name) < 0)
+		sb = prev->stat;
+	} else if (ul_path_stat(pc, &sb, 0, name) < 0)
 		f = new_stat_error_file(proc, sym, errno, assoc);
 	else {
 		const struct file_class *class = stat2class(&sb);
@@ -881,6 +916,7 @@ static struct file *collect_file_symlink(struct path_cxt *pc,
 
 	else if (assoc >= 0) {
 		/* file-descriptor based association */
+		bool is_socket = (sb.st_mode & S_IFMT) == S_IFSOCK;
 		FILE *fdinfo;
 
 		if (ul_path_stat(pc, &sb, AT_SYMLINK_NOFOLLOW, name) == 0)
@@ -888,6 +924,9 @@ static struct file *collect_file_symlink(struct path_cxt *pc,
 
 		if (is_nsfs_dev(f->stat.st_dev))
 			load_sock_xinfo(pc, name, f->stat.st_ino);
+
+		if (is_socket)
+			load_fdsk_xinfo(proc, assoc);
 
 		fdinfo = ul_path_fopenf(pc, "r", "fdinfo/%d", assoc);
 		if (fdinfo) {
@@ -1437,14 +1476,15 @@ static void fill_column(struct proc *proc,
 			struct file *file,
 			struct libscols_line *ln,
 			int column_id,
-			size_t column_index)
+			size_t column_index,
+			const char *uri __attribute__((__unused__)))
 {
 	const struct file_class *class = file->class;
 
 	while (class) {
 		if (class->fill_column
 		    && class->fill_column(proc, file, ln,
-					  column_id, column_index))
+					  column_id, column_index, uri))
 			break;
 		class = class->super;
 	}
@@ -1458,13 +1498,15 @@ static int filter_filler_cb(
 {
 	struct filler_data *fid = (struct filler_data *) userdata;
 
-	fill_column(fid->proc, fid->file, ln, get_column_id(colnum), colnum);
+	fill_column(fid->proc, fid->file, ln, get_column_id(colnum), colnum,
+		    fid->uri);
 	return 0;
 }
 
 static void convert_file(struct proc *proc,
 		     struct file *file,
-		     struct libscols_line *ln)
+		     struct libscols_line *ln,
+		     const char *uri __attribute__((__unused__)))
 
 {
 	size_t i;
@@ -1472,7 +1514,7 @@ static void convert_file(struct proc *proc,
 	for (i = 0; i < ncolumns; i++) {
 		if (scols_line_is_filled(ln, i))
 			continue;
-		fill_column(proc, file, ln, get_column_id(i), i);
+		fill_column(proc, file, ln, get_column_id(i), i, uri);
 	}
 }
 
@@ -1495,7 +1537,8 @@ static void convert(struct list_head *procs, struct lsfd_control *ctl)
 				int status = 0;
 				struct filler_data fid = {
 					.proc = proc,
-					.file = file
+					.file = file,
+					.uri = ctl->uri,
 				};
 
 				scols_filter_set_filler_cb(ctl->filter,
@@ -1508,7 +1551,7 @@ static void convert(struct list_head *procs, struct lsfd_control *ctl)
 				}
 			}
 
-			convert_file(proc, file, ln);
+			convert_file(proc, file, ln, ctl->uri);
 
 			if (!ctl->ct_filters)
 				continue;
@@ -1570,6 +1613,7 @@ static void finalize_class(const struct file_class *class)
 
 static void finalize_classes(void)
 {
+	finalize_class(&abst_class);
 	finalize_class(&file_class);
 	finalize_class(&cdev_class);
 	finalize_class(&bdev_class);
@@ -1727,7 +1771,7 @@ unsigned long add_name(struct name_manager *nm, const char *name)
 	if (e)
 		return e->id;
 
-	e = xmalloc(sizeof(struct identry));
+	e = xmalloc(sizeof(*e));
 	e->name = xstrdup(name);
 	e->id = nm->next_id++;
 	e->next = nm->cache->ent;
@@ -1822,7 +1866,7 @@ static void mark_select_fds_as_multiplexed(char *buf,
 		return;
 
 	for (int i = 0; i < 3; i++) {
-		/* If the remote address for the fd_set is 0x0, no set is tehre. */
+		/* If the remote address for the fd_set is 0x0, no set is there. */
 		remote[i].iov_len = local[i].iov_len = fds[i]? sizeof(local_set[i]): 0;
 		expected_n += (ssize_t)local[i].iov_len;
 		local[i].iov_base = local_set + i;
@@ -2148,6 +2192,7 @@ static void __attribute__((__noreturn__)) usage(void)
 	fputs(_("     --debug-filter           dump the internal data structure of filter and exit\n"), out);
 	fputs(_(" -C, --counter <name>:<expr>  define custom counter for --summary output\n"), out);
 	fputs(_("     --dump-counters          dump counter definitions\n"), out);
+	fputs(_("     --hyperlink[=mode]       print paths as terminal hyperlinks (always, never, or auto)\n"), out);
 	fputs(_("     --summary[=<when>]       print summary information (only, append, or never)\n"), out);
 	fputs(_("     --_drop-privilege        (testing purpose) do setuid(1) just after starting\n"), out);
 
@@ -2211,7 +2256,7 @@ static struct libscols_filter *new_filter(const char *expr, bool debug, struct l
 		if (!col) {
 			int id = column_name_to_id(name, strlen(name));
 			if (id >= 0)
-				col = add_column_by_id(ctl, id, SCOLS_FL_HIDDEN);
+				col = add_hidden_column(ctl, id);
 			if (!col) {
 				nerrs++;	/* report all unknown columns */
 				continue;
@@ -2264,7 +2309,7 @@ static struct counter_spec *new_counter_spec(const char *spec_str)
 		     _("don't use `{' in the name of a counter: %s"),
 		     spec_str);
 
-	spec = xmalloc(sizeof(struct counter_spec));
+	spec = xmalloc(sizeof(*spec));
 	INIT_LIST_HEAD(&spec->specs);
 	spec->name = spec_str;
 	spec->expr = sep + 1;
@@ -2395,15 +2440,13 @@ static void emit_summary(struct lsfd_control *ctl)
 
 		scols_reset_iter(itr, SCOLS_ITER_FORWARD);
 		while (scols_filter_next_counter(*ct_fltr, itr, &ct) == 0) {
-			char *str = NULL;
 			struct libscols_line *ln;
 
 			ln = scols_table_new_line(tb, NULL);
 			if (!ln)
 				err(EXIT_FAILURE, _("failed to allocate summary line"));
 
-			xasprintf(&str, "%llu", scols_counter_get_result(ct));
-			if (scols_line_refer_data(ln, 0, str))
+			if (scols_line_sprintf(ln, 0, "%llu", scols_counter_get_result(ct)))
 				err(EXIT_FAILURE, _("failed to add summary data"));
 			if (scols_line_set_data(ln, 1, scols_counter_get_name(ct)))
 				err(EXIT_FAILURE, _("failed to add summary data"));
@@ -2495,6 +2538,7 @@ int main(int argc, char *argv[])
 		OPT_SUMMARY,
 		OPT_DUMP_COUNTERS,
 		OPT_DROP_PRIVILEGE,
+		OPT_HYPERLINK
 	};
 	static const struct option longopts[] = {
 		{ "noheadings", no_argument, NULL, 'n' },
@@ -2514,6 +2558,7 @@ int main(int argc, char *argv[])
 		{ "dump-counters",no_argument, NULL, OPT_DUMP_COUNTERS },
 		{ "list-columns",no_argument, NULL, 'H' },
 		{ "_drop-privilege",no_argument,NULL,OPT_DROP_PRIVILEGE },
+		{ "hyperlink",  optional_argument, NULL, OPT_HYPERLINK },
 		{ NULL, 0, NULL, 0 },
 	};
 
@@ -2596,6 +2641,11 @@ int main(int argc, char *argv[])
 			if (setuid(1) == -1)
 				err(EXIT_FAILURE, _("failed to drop privilege"));
 			break;
+		case OPT_HYPERLINK:
+			if (hyperlinkwanted_or_err(optarg,
+					_("invalid hyperlink argument")))
+				ctl.uri = xgethosturi(NULL);
+			break;
 		case 'V':
 			print_version(EXIT_SUCCESS);
 		case 'h':
@@ -2645,8 +2695,7 @@ int main(int argc, char *argv[])
 
 	/* create output columns */
 	for (i = 0; i < ncolumns; i++) {
-		const struct colinfo *col = get_column_info(i);
-		struct libscols_column *cl = add_column(ctl.tb, col, 0);
+		struct libscols_column *cl = add_column(ctl.tb, get_column_id(i), 0, ctl.uri);
 
 		if (!cl)
 			err(EXIT_FAILURE, _("failed to allocate output column"));

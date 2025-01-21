@@ -69,7 +69,8 @@ if build_liblastlog2 and systemd.found()
     configuration : conf)
   install_data(
     lastlog2_tmpfiles,
-    install_dir : '/usr/lib/tmpfiles.d')
+    install_dir : '/usr/lib/tmpfiles.d',
+    rename : 'lastlog2.conf')
 
   lastlog2_service = configure_file(
     input : 'lastlog2-import.service.in',
@@ -87,7 +88,8 @@ if build_uuidd and systemd.found()
     configuration : conf)
   install_data(
     uuidd_tmpfiles,
-    install_dir : '/usr/lib/tmpfiles.d')
+    install_dir : '/usr/lib/tmpfiles.d',
+    rename : 'uuidd.conf')
 
   uuidd_service = configure_file(
     input : 'uuidd.service.in',
@@ -104,6 +106,11 @@ if build_uuidd and systemd.found()
   install_data(
     uuidd_socket,
     install_dir : systemdsystemunitdir)
+
+  install_data(
+    'uuidd-sysusers.conf',
+    install_dir: systemd_sysusers_dir,
+    rename : 'uuidd.conf')
 endif
 if build_uuidd and sysvinit
   uuidd_rc = configure_file(
@@ -147,11 +154,13 @@ getopt_sources = files(
   'getopt.c',
 )
 
-install_data(
-  'getopt-example.bash',
-  'getopt-example.tcsh',
-  install_dir : docdir,
-  install_mode: 'rwxr-xr-x')
+if not get_option('build-getopt').disabled()
+  install_data(
+    'getopt-example.bash',
+    'getopt-example.tcsh',
+    install_dir : docdir,
+    install_mode: 'rwxr-xr-x')
+endif
 
 exch_sources = files(
   'exch.c',

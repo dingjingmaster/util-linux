@@ -8,10 +8,15 @@
  *
  * rtc.c - Use /dev/rtc for clock access
  */
+#ifdef __GNU__
+#include <sys/ioctl.h>
+#include <hurd/rtc.h>
+#else
 #include <asm/ioctl.h>
-#include <errno.h>
 #include <linux/rtc.h>
 #include <linux/types.h>
+#endif /* __GNU__ */
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +33,7 @@
 
 #include "hwclock.h"
 
+#ifndef __GNU__
 #ifndef RTC_PARAM_GET
 struct rtc_param {
 	__u64 param;
@@ -60,6 +66,7 @@ const struct hwclock_param *get_hwclock_params(void)
 {
 	return hwclock_params;
 }
+#endif /* __GNU__ */
 
 /*
  * /dev/rtc is conventionally chardev 10/135
@@ -99,12 +106,20 @@ static int open_rtc(const struct hwclock_control *ctl)
 	/* --rtc option has been given */
 	if (ctl->rtc_dev_name) {
 		rtc_dev_name = ctl->rtc_dev_name;
+#ifdef __GNU__
+		rtc_dev_fd = open(rtc_dev_name, O_RDWR);
+#else
 		rtc_dev_fd = open(rtc_dev_name, O_RDONLY);
+#endif
 	} else {
 		for (i = 0; i < ARRAY_SIZE(fls); i++) {
 			if (ctl->verbose)
 				printf(_("Trying to open: %s\n"), fls[i]);
+#ifdef __GNU__
+			rtc_dev_fd = open(fls[i], O_RDWR);
+#else
 			rtc_dev_fd = open(fls[i], O_RDONLY);
+#endif
 
 			if (rtc_dev_fd < 0) {
 				if (errno == ENOENT || errno == ENODEV)
@@ -197,7 +212,7 @@ static int busywait_for_rtc_clock_tick(const struct hwclock_control *ctl,
 		if (rc || start_time.tm_sec != nowtime.tm_sec)
 			break;
 		gettime_monotonic(&now);
-		if (time_diff(now, begin) > 1.5) {
+		if (time_diff(&now, &begin) > 1.5) {
 			warnx(_("Timed out waiting for time change."));
 			return 1;
 		}
@@ -411,6 +426,7 @@ int set_epoch_rtc(const struct hwclock_control *ctl)
 
 
 
+#ifndef __GNU__
 static int resolve_rtc_param_alias(const char *alias, __u64 *value)
 {
 	const struct hwclock_param *param = &hwclock_params[0];
@@ -439,7 +455,7 @@ int get_param_rtc(const struct hwclock_control *ctl,
 		  const char *name, uint64_t *id, uint64_t *value)
 {
 	int rtc_fd;
-	struct rtc_param param = { .param = 0 };
+	struct rtc_param param = { .index = ctl->param_idx };
 
 	/* handle name */
 	if (resolve_rtc_param_alias(name, &param.param) != 0
@@ -479,7 +495,7 @@ int get_param_rtc(const struct hwclock_control *ctl,
 int set_param_rtc(const struct hwclock_control *ctl, const char *opt0)
 {
 	int rtc_fd, rc = 1;
-	struct rtc_param param = { .param = 0 };
+	struct rtc_param param = { .index = ctl->param_idx };
 	char *tok, *opt = xstrdup(opt0);
 
 	/* handle name */
@@ -609,3 +625,4 @@ int rtc_vl_clear(const struct hwclock_control *ctl)
 
 	return 0;
 }
+#endif /* __GNU__ */

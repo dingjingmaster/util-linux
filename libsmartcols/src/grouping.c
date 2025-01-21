@@ -11,7 +11,7 @@
  * Lines groups manipulation API. The grouping API can be used to create M:N
  * relations between lines and on tree-like output it prints extra chart to
  * visualize these relations. The group has unlimited number of members and
- * group childs. See libsmartcols/sample/grouping* for more details.
+ * group children. See libsmartcols/sample/grouping* for more details.
  */
 
 /* Private API */
@@ -142,7 +142,7 @@ void scols_groups_fix_members_order(struct libscols_table *tb)
 
 static inline const char *group_state_to_string(int state)
 {
-	static const char *grpstates[] = {
+	static const char *const grpstates[] = {
 		[SCOLS_GSTATE_NONE]		= "none",
 		[SCOLS_GSTATE_FIRST_MEMBER]	= "1st-member",
 		[SCOLS_GSTATE_MIDDLE_MEMBER]	= "middle-member",
@@ -505,7 +505,7 @@ int scols_table_group_lines(	struct libscols_table *tb,
 			return -EINVAL;
 		}
 		if (ln->group && member->group && ln->group != member->group) {
-			DBG(GROUP, ul_debugobj(gr, "failed group lines (groups mismatch bwteen member and line"));
+			DBG(GROUP, ul_debugobj(gr, "failed group lines (groups mismatch between member and line)"));
 			return -EINVAL;
 		}
 	}

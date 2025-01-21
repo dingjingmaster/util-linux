@@ -74,6 +74,18 @@ void *xcalloc(const size_t nelems, const size_t size)
 
 static inline
 __attribute__((warn_unused_result))
+__ul_alloc_size(2)
+__ul_returns_nonnull
+void *xmemdup(const void *ptr, size_t size)
+{
+	void *ret = xmalloc(size);
+
+	memcpy(ret, ptr, size);
+	return ret;
+}
+
+static inline
+__attribute__((warn_unused_result))
 __ul_returns_nonnull
 char *xstrdup(const char *str)
 {
@@ -179,6 +191,23 @@ char *xgethostname(void)
 	}
 	name[sz - 1] = '\0';
 	return name;
+}
+
+static inline
+__attribute__((warn_unused_result))
+char *xgethosturi(const char *proto)
+{
+	char *n = xgethostname();
+	char *uri = NULL;
+
+	if (!proto)
+		proto = "file://";
+	if (!n)
+		return xstrdup(proto);
+
+	xasprintf(&uri, "%s%s", proto, n);
+	free(n);
+	return uri;
 }
 
 #endif

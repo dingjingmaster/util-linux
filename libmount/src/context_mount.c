@@ -20,6 +20,7 @@
 
 #include "mountP.h"
 #include "strutils.h"
+#include "strv.h"
 
 #if defined(HAVE_SMACK)
 static int is_option(const char *name, const char *const *names)
@@ -451,10 +452,10 @@ static int exec_helper(struct libmnt_context *cxt)
 			args[i++] = type;		/* 11 */
 		}
 		if (namespace) {
-			args[i++] = "-N";		/* 11 */
-			args[i++] = namespace;		/* 12 */
+			args[i++] = "-N";		/* 12 */
+			args[i++] = namespace;		/* 13 */
 		}
-		args[i] = NULL;				/* 13 */
+		args[i] = NULL;				/* 14 */
 		for (i = 0; args[i]; i++)
 			DBG(CXT, ul_debugobj(cxt, "argv[%d] = \"%s\"",
 							i, args[i]));
@@ -581,6 +582,15 @@ static int is_success_status(struct libmnt_context *cxt)
 	return 0;
 }
 
+static int is_termination_status(struct libmnt_context *cxt)
+{
+	if (is_success_status(cxt))
+		return 1;
+
+	return mnt_context_get_syscall_errno(cxt) != EINVAL &&
+	       mnt_context_get_syscall_errno(cxt) != ENODEV;
+}
+
 /* try mount(2) for all items in comma separated list of the filesystem @types */
 static int do_mount_by_types(struct libmnt_context *cxt, const char *types)
 {
@@ -621,7 +631,7 @@ static int do_mount_by_types(struct libmnt_context *cxt, const char *types)
 			rc = do_mount(cxt, p);
 		p = end ? end + 1 : NULL;
 		free(autotype);
-	} while (!is_success_status(cxt) && p);
+	} while (!is_termination_status(cxt) && p);
 
 	free(p0);
 	return rc;
@@ -666,10 +676,7 @@ static int do_mount_by_pattern(struct libmnt_context *cxt, const char *pattern)
 	for (fp = filesystems; *fp; fp++) {
 		DBG(CXT, ul_debugobj(cxt, " ##### trying '%s'", *fp));
 		rc = do_mount(cxt, *fp);
-		if (is_success_status(cxt))
-			break;
-		if (mnt_context_get_syscall_errno(cxt) != EINVAL &&
-		    mnt_context_get_syscall_errno(cxt) != ENODEV)
+		if (is_termination_status(cxt))
 			break;
 	}
 	mnt_free_filesystems(filesystems);
@@ -720,7 +727,7 @@ static int prepare_target(struct libmnt_context *cxt)
 		return -MNT_ERR_NAMESPACE;
 
 	/* canonicalize the path */
-	if (rc == 0) {
+	if (rc == 0 && !mnt_context_is_xnocanonicalize(cxt, "target")) {
 		struct libmnt_cache *cache = mnt_context_get_cache(cxt);
 
 		if (cache) {
@@ -954,6 +961,24 @@ int mnt_context_finalize_mount(struct libmnt_context *cxt)
 	return rc;
 }
 
+static int is_erofs_regfile(struct libmnt_context *cxt)
+{
+	const char *type = mnt_fs_get_fstype(cxt->fs);
+	const char *src = mnt_fs_get_srcpath(cxt->fs);
+	unsigned long flags = 0;
+	struct stat st;
+
+	if (!type || strcmp(type, "erofs") != 0)
+		return 0;
+	if (mnt_context_get_user_mflags(cxt, &flags))
+		return 0;
+	if (flags & (MNT_MS_LOOP | MNT_MS_OFFSET | MNT_MS_SIZELIMIT))
+		return 0;	/* it's already loopdev */
+	if (!src || stat(src, &st) != 0 || !S_ISREG(st.st_mode))
+		return 0;
+	return 1;
+}
+
 /**
  * mnt_context_mount:
  * @cxt: mount context
@@ -1056,6 +1081,23 @@ again:
 			cxt->flags |= MNT_FL_FORCED_RDONLY;
 			goto again;
 		}
+	}
+
+	/*
+	 * Try mount EROFS image again with loop device.
+	 * See hook_loopdev.c:is_loopdev_required() for more details.
+	 */
+	if (rc && mnt_context_get_syscall_errno(cxt) == ENOTBLK
+	       && is_erofs_regfile(cxt)) {
+		struct libmnt_optlist *ol = mnt_context_get_optlist(cxt);
+
+		mnt_context_reset_status(cxt);
+		DBG(CXT, ul_debugobj(cxt, "enabling loop= for EROFS"));
+		mnt_optlist_append_flags(ol, MNT_MS_LOOP, cxt->map_userspace);
+
+		rc = mnt_context_call_hooks(cxt, MNT_STAGE_PREP_SOURCE);
+		if (!rc)
+			goto again;
 	}
 
 	if (rc == 0)
@@ -1402,6 +1444,31 @@ done:
 	return rc;
 }
 
+static void join_err_mesgs(struct libmnt_context *cxt, char *buf, size_t bufsz)
+{
+	char **s;
+	int n = 0;
+
+	if (!cxt || !buf || strv_isempty(cxt->mesgs))
+		return;
+
+	STRV_FOREACH(s, cxt->mesgs) {
+		size_t len;
+
+		if (!bufsz)
+			break;
+		if (!startswith(*s, "e "))
+			continue;
+		if (n) {
+			len = xstrncpy(buf, "; ", bufsz);
+			buf += len, bufsz -= len;
+		}
+		len = xstrncpy(buf, (*s) + 2, bufsz);
+		buf += len, bufsz -= len;
+		n++;
+	}
+}
+
 int mnt_context_get_mount_excode(
 			struct libmnt_context *cxt,
 			int rc,
@@ -1447,8 +1514,10 @@ int mnt_context_get_mount_excode(
 	mnt_context_get_user_mflags(cxt, &uflags);	/* userspace flags */
 
 	if (!mnt_context_syscall_called(cxt)) {
-		if (buf && cxt->errmsg) {
-			xstrncpy(buf, cxt->errmsg, bufsz);
+
+		/* libmount errors already added to context log */
+		if (buf && mnt_context_get_nmesgs(cxt, 'e')) {
+			join_err_mesgs(cxt, buf, bufsz);
 			return MNT_EX_USAGE;
 		}
 
@@ -1591,16 +1660,20 @@ int mnt_context_get_mount_excode(
 	 */
 	syserr = mnt_context_get_syscall_errno(cxt);
 
-	if (buf && cxt->errmsg) {
-		if (cxt->syscall_name)
-			snprintf(buf, bufsz, _("%s system call failed: %s"),
-					cxt->syscall_name, cxt->errmsg);
-		else
-			xstrncpy(buf, cxt->errmsg, bufsz);
+	/* Error with already generated messages (by kernel or libmount) */
+	if (buf && mnt_context_get_nmesgs(cxt, 'e')) {
+		if (cxt->syscall_name) {
+			size_t len = snprintf(buf, bufsz,
+					_("%s system call failed: "),
+					cxt->syscall_name);
+			join_err_mesgs(cxt, buf + len, bufsz - len);
+		} else
+			join_err_mesgs(cxt, buf, bufsz);
 
 		return MNT_EX_FAIL;
 	}
 
+	/* Classic mount(2) errors */
 	switch(syserr) {
 	case EPERM:
 		if (!buf)

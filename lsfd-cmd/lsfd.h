@@ -63,6 +63,7 @@ enum {
 	COL_BPF_MAP_TYPE_RAW,
 	COL_BPF_NAME,
 	COL_BPF_PROG_ID,
+	COL_BPF_PROG_TAG,
 	COL_BPF_PROG_TYPE,
 	COL_BPF_PROG_TYPE_RAW,
 	COL_CHRDRV,
@@ -141,6 +142,12 @@ enum {
 	COL_UID,		/* process */
 	COL_UNIX_PATH,
 	COL_USER,		/* process */
+	COL_VSOCK_LADDR,
+	COL_VSOCK_RADDR,
+	COL_VSOCK_LCID,
+	COL_VSOCK_RCID,
+	COL_VSOCK_LPORT,
+	COL_VSOCK_RPORT,
 	COL_XMODE,
 	LSFD_N_COLS		/* This must be at last. */
 };
@@ -206,10 +213,10 @@ struct file {
 	unsigned int sys_flags;
 	unsigned int mnt_id;
 
-	uint8_t locked_read:1,
-		locked_write:1,
-		multiplexed:1,
-		is_error:1;
+	bool	locked_read,
+		locked_write,
+		multiplexed,
+		is_error;
 };
 
 #define is_opened_file(_f) ((_f)->association >= 0)
@@ -225,7 +232,8 @@ struct file_class {
 			    struct file *file,
 			    struct libscols_line *ln,
 			    int column_id,
-			    size_t column_index);
+			    size_t column_index,
+			    const char *uri);
 	int  (*handle_fdinfo)(struct file *file, const char *key, const char* value);
 	void (*attach_xinfo)(struct file *file);
 	void (*initialize_content)(struct file *file);
@@ -280,6 +288,7 @@ enum decode_source_level {
 
 void decode_source(char *buf, size_t bufsize, unsigned int dev_major, unsigned int dev_minor,
 		   enum decode_source_level level);
+
 /*
  * Name managing
  */
@@ -302,6 +311,7 @@ void add_nodev(unsigned long minor, const char *filesystem);
  */
 void load_sock_xinfo(struct path_cxt *pc, const char *name, ino_t netns);
 bool is_nsfs_dev(dev_t dev);
+void load_fdsk_xinfo(struct proc *proc, int fd);
 
 /*
  * POSIX Mqueue

@@ -560,8 +560,11 @@ static int colors_terminal_is_ready(void)
 	{
 		int ret;
 
-		if (setupterm(NULL, STDOUT_FILENO, &ret) == 0 && ret == 1)
+		/* setupterm() allocates memory, del_curterm() deallocates it */
+		if (setupterm(NULL, STDOUT_FILENO, &ret) == 0 && ret == 1) {
 			ncolors = tigetnum("colors");
+			del_curterm(cur_term);
+		}
 	}
 #endif
 	if (1 < ncolors) {
@@ -726,7 +729,7 @@ const char *color_get_disable_sequence(void)
 int colormode_from_string(const char *str)
 {
 	size_t i;
-	static const char *modes[] = {
+	static const char *const modes[] = {
 		[UL_COLORMODE_AUTO]   = "auto",
 		[UL_COLORMODE_NEVER]  = "never",
 		[UL_COLORMODE_ALWAYS] = "always",

@@ -27,16 +27,25 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/ioctl.h>
-#include <sys/mount.h>
 
-#include "mount-api-utils.h"
+#include "c.h"
+
+#ifdef __linux__
+# include <sys/mount.h>
+# include "mount-api-utils.h"
+#endif
 
 #ifdef HAVE_LINUX_NSFS_H
 # include <linux/nsfs.h>
 # if defined(NS_GET_NSTYPE) && defined(NS_GET_OWNER_UID)
-#  define USE_NS_GET_API	1
+#  define USE_NS_GET_NSTYPE	1
+# endif
+# if defined(NS_GET_USERNS)
+#  define USE_NS_GET_USERNS	1
 # endif
 #endif
+
+#include "xalloc.h"
 
 typedef struct {
 	const char	*name;
@@ -123,13 +132,38 @@ static int hlp_enotty_ok(void)
 
 static int hlp_fsopen_ok(void)
 {
-#ifdef FSOPEN_CLOEXEC
+#if defined(HAVE_FSOPEN) && defined(FSOPEN_CLOEXEC)
 	errno = 0;
 	fsopen(NULL, FSOPEN_CLOEXEC);
 #else
 	errno = ENOSYS;
 #endif
 	printf("%d\n", errno != ENOSYS);
+	return 0;
+}
+
+static int hlp_statmount_ok(void)
+{
+#ifdef HAVE_STATMOUNT_API
+	errno = 0;
+	ul_statmount(0, 0, 0, NULL, 0, 0);
+#else
+	errno = ENOSYS;
+#endif
+	printf("%d\n", errno != ENOSYS);
+	return 0;
+}
+
+static int hlp_listmount_ok(void)
+{
+#ifdef HAVE_STATMOUNT_API
+	uint64_t dummy;
+	errno = 0;
+	ul_listmount(LSMT_ROOT, 0, 0, &dummy, 1, LISTMOUNT_REVERSE);
+#else
+	errno = ENOSYS;
+#endif
+	printf("%d\n", !(errno == ENOSYS || errno == EINVAL));
 	return 0;
 }
 
@@ -141,13 +175,32 @@ static int hlp_sz_time(void)
 
 static int hlp_get_nstype_ok(void)
 {
-#ifdef USE_NS_GET_API
+#ifdef USE_NS_GET_NSTYPE
 	errno = 0;
 	ioctl(STDOUT_FILENO, NS_GET_NSTYPE);
 #else
 	errno = ENOSYS;
 #endif
 	printf("%d\n", errno != ENOSYS);
+	return 0;
+}
+
+static int hlp_get_userns_ok(void)
+{
+#ifdef USE_NS_GET_USERNS
+	errno = 0;
+	ioctl(STDOUT_FILENO, NS_GET_USERNS);
+#else
+	errno = ENOSYS;
+#endif
+	printf("%d\n", errno != ENOSYS);
+	return 0;
+}
+
+static int hlp_hostname(void)
+{
+	char * h = xgethostname();
+	printf("%s\n", h);
 	return 0;
 }
 
@@ -165,8 +218,12 @@ static const mntHlpfnc hlps[] =
 	{ "wcsspn-ok",  hlp_wcsspn_ok   },
 	{ "enotty-ok",  hlp_enotty_ok   },
 	{ "fsopen-ok",  hlp_fsopen_ok   },
+	{ "statmount-ok", hlp_statmount_ok },
+	{ "listmount-ok", hlp_listmount_ok },
 	{ "sz(time_t)", hlp_sz_time     },
 	{ "ns-gettype-ok", hlp_get_nstype_ok },
+	{ "ns-getuserns-ok", hlp_get_userns_ok },
+	{ "hostname", hlp_hostname, },
 	{ NULL, NULL }
 };
 

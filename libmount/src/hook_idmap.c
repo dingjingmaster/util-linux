@@ -20,12 +20,10 @@
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
-#include <inttypes.h>
 
 #include "strutils.h"
 #include "all-io.h"
 #include "namespace.h"
-#include "mount-api-utils.h"
 
 #include "mountP.h"
 
@@ -303,7 +301,7 @@ static int hook_mount_post(
 		.attr_set	= MOUNT_ATTR_IDMAP,
 		.userns_fd	= hd->userns_fd
 	};
-	const int recursive = mnt_optlist_is_recursive(cxt->optlist);
+	const int recursive = mnt_optlist_is_rpropagation(cxt->optlist);
 	const char *target = mnt_fs_get_target(cxt->fs);
 	int fd_tree = -1;
 	int rc, is_private = 1;

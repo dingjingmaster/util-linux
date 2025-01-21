@@ -741,7 +741,7 @@ static const char *get_pwd_method(const char *str, const char **next)
 #define is_valid_pwd_char(x)	(isascii((unsigned char) (x)) && !is_invalid_pwd_char(x))
 
 /*
- * This function do not accept empty passwords or locked accouns.
+ * This function does not accept empty passwords or locked accounts.
  */
 static int valid_pwd(const char *str)
 {
@@ -904,7 +904,7 @@ static struct lslogins_user *get_user_info(struct lslogins_control *ctl, const c
 			}
 			break;
 		case COL_HUSH_STATUS:
-			user->hushed = get_hushlogin_status(pwd, 0);
+			user->hushed = get_hushlogin_status(pwd, /* override_home= */ NULL, 0);
 			if (user->hushed == -1)
 				user->hushed = STATUS_UNKNOWN;
 			break;
@@ -1739,7 +1739,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'V':
 		{
-			static const char *features[] = {
+			static const char *const features[] = {
 #ifdef HAVE_LIBLASTLOG2
 				"lastlog2",
 #endif

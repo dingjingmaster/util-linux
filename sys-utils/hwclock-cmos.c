@@ -88,7 +88,7 @@ static unsigned short clock_ctl_addr = 0x70;
 static unsigned short clock_data_addr = 0x71;
 
 /*
- * Hmmh, this isn't very atomic. Maybe we should force an error instead?
+ * Hmm, this isn't very atomic. Maybe we should force an error instead?
  *
  * TODO: optimize the access to CMOS by mlockall(MCL_CURRENT) and SCHED_FIFO
  */
@@ -352,7 +352,6 @@ static int i386_iopl(const int level)
 # else
 static int i386_iopl(const int level __attribute__ ((__unused__)))
 {
-	extern int ioperm(unsigned long from, unsigned long num, int turn_on);
 	return ioperm(clock_ctl_addr, 2, 1);
 }
 # endif

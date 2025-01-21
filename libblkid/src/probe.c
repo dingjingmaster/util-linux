@@ -125,7 +125,7 @@
 /*
  * All supported chains
  */
-static const struct blkid_chaindrv *chains_drvs[] = {
+static const struct blkid_chaindrv *const chains_drvs[] = {
 	[BLKID_CHAIN_SUBLKS] = &superblocks_drv,
 	[BLKID_CHAIN_TOPLGY] = &topology_drv,
 	[BLKID_CHAIN_PARTS] = &partitions_drv
@@ -791,6 +791,35 @@ const unsigned char *blkid_probe_get_buffer(blkid_probe pr, uint64_t off, uint64
 	return real_off ? bf->data + (real_off - bf->off + bias) : bf->data + bias;
 }
 
+#ifdef O_DIRECT
+/*
+ * This is blkid_probe_get_buffer with the read done as an O_DIRECT operation.
+ * Note that @off is offset within probing area, the probing area is defined by
+ * pr->off and pr->size.
+ */
+const unsigned char *blkid_probe_get_buffer_direct(blkid_probe pr, uint64_t off, uint64_t len)
+{
+	const unsigned char *ret = NULL;
+	int flags, rc, olderrno;
+
+	flags = fcntl(pr->fd, F_GETFL);
+	rc = fcntl(pr->fd, F_SETFL, flags | O_DIRECT);
+	if (rc) {
+		DBG(LOWPROBE, ul_debug("fcntl F_SETFL failed to set O_DIRECT"));
+		errno = 0;
+		return NULL;
+	}
+	ret = blkid_probe_get_buffer(pr, off, len);
+	olderrno = errno;
+	rc = fcntl(pr->fd, F_SETFL, flags);
+	if (rc) {
+		DBG(LOWPROBE, ul_debug("fcntl F_SETFL failed to clear O_DIRECT"));
+		errno = olderrno;
+	}
+	return ret;
+}
+#endif
+
 /**
  * blkid_probe_reset_buffers:
  * @pr: prober
@@ -972,10 +1001,19 @@ failed:
 
 #endif
 
-#ifdef BLKIOOPT
 static uint64_t blkid_get_io_size(int fd)
 {
-	static const int ioctls[] = { BLKIOOPT, BLKIOMIN, BLKBSZGET };
+	static const int ioctls[] = {
+#ifdef BLKIOOPT
+		BLKIOOPT,
+#endif
+#ifdef BLKIOMIN
+		BLKIOMIN,
+#endif
+#ifdef BLKBSZGET
+		BLKBSZGET,
+#endif
+	};
 	unsigned int s;
 	size_t i;
 	int r;
@@ -988,7 +1026,6 @@ static uint64_t blkid_get_io_size(int fd)
 
 	return DEFAULT_SECTOR_SIZE;
 }
-#endif
 
 /**
  * blkid_probe_set_device:
@@ -1197,10 +1234,8 @@ int blkid_probe_set_device(blkid_probe pr, int fd,
 	}
 # endif
 
-#ifdef BLKIOOPT
 	if (S_ISBLK(sb.st_mode) && !is_floppy && !blkid_probe_is_tiny(pr))
 		pr->io_size = blkid_get_io_size(fd);
-#endif
 
 	DBG(LOWPROBE, ul_debug("ready for low-probing, offset=%"PRIu64", size=%"PRIu64", zonesize=%"PRIu64", iosize=%"PRIu64,
 				pr->off, pr->size, pr->zone_size, pr->io_size));

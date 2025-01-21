@@ -347,13 +347,12 @@ static int lookup_umount_fs_by_mountinfo(struct libmnt_context *cxt, const char 
 	return 0;
 }
 
-/* This function searches for FS according to cxt->fs->target,
- * apply result to cxt->fs and it's umount replacement to
- * mnt_context_apply_fstab(), use mnt_context_tab_applied()
- * to check result.
+/*
+ * This function searches for the file system according to cxt->fs->target and
+ * applies the result to cxt->fs. This function is a umount replacement for
+ * mnt_context_apply_fstab(). Use mnt_context_tab_applied() to check the result.
  *
- * The goal is to minimize situations when we need to parse
- * /proc/self/mountinfo.
+ * The goal is to minimize situations when we need to parse /proc/self/mountinfo.
  */
 static int lookup_umount_fs(struct libmnt_context *cxt)
 {
@@ -888,7 +887,17 @@ static int do_umount(struct libmnt_context *cxt)
 	if (mnt_context_is_fake(cxt))
 		rc = 0;
 	else {
+		struct stat st;
+
 		rc = flags ? umount2(target, flags) : umount(target);
+
+		if (rc < 0
+		    && errno == EINVAL
+		    && !(flags & UMOUNT_NOFOLLOW)
+		    && !mnt_context_is_restricted(cxt)
+		    && mnt_safe_lstat(target, &st) == 0 && S_ISLNK(st.st_mode))
+			rc = umount2(target, flags | UMOUNT_NOFOLLOW);
+
 		if (rc < 0)
 			cxt->syscall_status = -errno;
 		free(tgtbuf);

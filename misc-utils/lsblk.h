@@ -6,6 +6,7 @@
 #ifndef UTIL_LINUX_LSBLK_H
 #define UTIL_LINUX_LSBLK_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <sys/stat.h>
@@ -32,6 +33,16 @@ UL_DEBUG_DECLARE_MASK(lsblk);
 #define UL_DEBUG_CURRENT_MASK	UL_DEBUG_MASK(lsblk)
 #include "debugobj.h"
 
+/* --properties-by items */
+enum lsblk_devprop_method {
+	LSBLK_METHOD_NONE = 0,
+	LSBLK_METHOD_UDEV,
+	LSBLK_METHOD_BLKID,
+	LSBLK_METHOD_FILE,
+
+	__LSBLK_NMETHODS	/* keep last */
+};
+
 struct lsblk {
 	struct libscols_table *table;	/* output table */
 	struct libscols_column *sort_col;/* sort output by this column */
@@ -49,22 +60,25 @@ struct lsblk {
 	size_t ncts;				/* number of ct filters */
 
 	const char *sysroot;
+	char *uri;
 	int flags;			/* LSBLK_* */
 
-	unsigned int all_devices:1;	/* print all devices, including empty */
-	unsigned int bytes:1;		/* print SIZE in bytes */
-	unsigned int inverse:1;		/* print inverse dependencies */
-	unsigned int merge:1;           /* merge sub-trees */
-	unsigned int nodeps:1;		/* don't print slaves/holders */
-	unsigned int scsi:1;		/* print only device with HCTL (SCSI) */
-	unsigned int nvme:1;		/* print NVMe device only */
-	unsigned int virtio:1;		/* print virtio device only */
-	unsigned int paths:1;		/* print devnames with "/dev" prefix */
-	unsigned int sort_hidden:1;	/* sort column not between output columns */
-	unsigned int rawdata : 1;	/* has rawdata in cell userdata */
-	unsigned int dedup_hidden :1;	/* deduplication column not between output columns */
-	unsigned int force_tree_order:1;/* sort lines by parent->tree relation */
-	unsigned int noempty:1;		/* hide empty devices */
+	int properties_by[__LSBLK_NMETHODS];
+
+	bool all_devices;	/* print all devices, including empty */
+	bool bytes;		/* print SIZE in bytes */
+	bool inverse;		/* print inverse dependencies */
+	bool merge;		/* merge sub-trees */
+	bool nodeps;		/* don't print slaves/holders */
+	bool scsi;		/* print only device with HCTL (SCSI) */
+	bool nvme;		/* print NVMe device only */
+	bool virtio;		/* print virtio device only */
+	bool paths;		/* print devnames with "/dev" prefix */
+	bool sort_hidden;	/* sort column not between output columns */
+	bool rawdata;		/* has rawdata in cell userdata */
+	bool dedup_hidden;	/* deduplication column not between output columns */
+	bool force_tree_order;	/* sort lines by parent->tree relation */
+	bool noempty;		/* hide empty devices */
 };
 
 extern struct lsblk *lsblk;     /* global handler */
@@ -93,6 +107,8 @@ struct lsblk_devprop {
 	char *group;		/* group name */
 	char *mode;		/* access mode in ls(1)-like notation */
 };
+
+
 
 /* Device dependence
  *
@@ -232,6 +248,8 @@ extern struct lsblk_devprop *lsblk_device_get_properties(struct lsblk_device *de
 extern void lsblk_properties_deinit(void);
 
 extern const char *lsblk_parttype_code_to_string(const char *code, const char *pttype);
+
+extern int lsblk_set_properties_method(const char *opts);
 
 /* lsblk-devtree.c */
 void lsblk_reset_iter(struct lsblk_iter *itr, int direction);

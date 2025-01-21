@@ -23,7 +23,8 @@
 #include <stdint.h>
 #include <stdarg.h>
 #if defined (HAVE_LIBECONF)
-#include <libeconf.h>
+# include <libeconf.h>
+# include "pathnames.h"
 #endif
 
 #include "blkidP.h"
@@ -161,13 +162,13 @@ struct blkid_config *blkid_read_config(const char *filename)
 		DBG(CONFIG, ul_debug("reading config file: %s.", filename));
 		error = econf_readFile(&file, filename, "= \t", "#");
 	} else {
-		error = econf_readDirs(&file,
-#if USE_VENDORDIR
-				       _PATH_VENDORDIR,
+#ifdef HAVE_ECONF_READCONFIG
+		error = econf_readConfig(&file, NULL,
+			UL_VENDORDIR_PATH, "blkid", "conf", "= \t", "#");
 #else
-				       NULL,
+		error = econf_readDirs(&file,
+			UL_VENDORDIR_PATH, "/etc", "blkid", "conf", "= \t", "#");
 #endif
-				       "/etc", "blkid", "conf", "= \t", "#");
 	}
 
 	if (error) {
@@ -191,7 +192,7 @@ struct blkid_config *blkid_read_config(const char *filename)
 
 	if ((error = econf_getBoolValue(file, NULL, "SEND_UEVENT", &uevent))) {
 		if (error != ECONF_NOKEY) {
-			DBG(CONFIG, ul_debug("couldn't fetch SEND_UEVENT corrently: %s", econf_errString(error)));
+			DBG(CONFIG, ul_debug("couldn't fetch SEND_UEVENT currently: %s", econf_errString(error)));
 			goto err;
 		} else {
 			DBG(CONFIG, ul_debug("key SEND_UEVENT not found, using built-in default "));

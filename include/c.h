@@ -37,6 +37,8 @@
 # define NAME_MAX PATH_MAX
 #endif
 
+#define BIT(n)                 (1 << (n))
+
 /*
  * __GNUC_PREREQ is deprecated in favour of __has_attribute() and
  * __has_feature(). The __has macros are supported by clang and gcc>=5.
@@ -484,10 +486,10 @@ static inline void __attribute__((__noreturn__)) ul_sig_err(int excode, const ch
 		exit(eval); \
 })
 
-static inline void print_features(const char **features, const char *prefix)
+static inline void print_features(const char *const*features, const char *prefix)
 {
 	if (features && *features) {
-		const char **p = features;
+		const char *const*p = features;
 		while (p && *p) {
 			if (prefix && p == features)
 				printf(" (%s ", prefix);

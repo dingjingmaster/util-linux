@@ -233,20 +233,20 @@ struct dmesg_control {
 
 	struct ul_jsonwrt jfmt;		/* -J formatting */
 
-	unsigned int	follow:1,	/* wait for new messages */
-			end:1,		/* seek to the of buffer */
-			raw:1,		/* raw mode */
-			noesc:1,	/* no escape */
-			fltr_lev:1,	/* filter out by levels[] */
-			fltr_fac:1,	/* filter out by facilities[] */
-			decode:1,	/* use "facility: level: " prefix */
-			pager:1,	/* pipe output into a pager */
-			color:1,	/* colorize messages */
-			json:1,		/* JSON output */
-			force_prefix:1;	/* force timestamp and decode prefix
+	bool		follow,		/* wait for new messages */
+			end,		/* seek to the of buffer */
+			raw,		/* raw mode */
+			noesc,		/* no escape */
+			fltr_lev,	/* filter out by levels[] */
+			fltr_fac,	/* filter out by facilities[] */
+			decode,		/* use "facility: level: " prefix */
+			pager,		/* pipe output into a pager */
+			color,		/* colorize messages */
+			json,		/* JSON output */
+			force_prefix;	/* force timestamp and decode prefix
 					   on each line */
 	int		indent;		/* due to timestamps if newline */
-	size_t          caller_id_size;   /* PRINTK_CALLERID max field size */
+	size_t          caller_id_size;	/* PRINTK_CALLERID max field size */
 };
 
 struct dmesg_record {
@@ -600,11 +600,6 @@ static const char *parse_kmsg_timestamp(const char *str0, struct timeval *tv)
 		return str0;
 
 	return end + 1;	/* skip separator */
-}
-
-static double time_diff(struct timeval *a, struct timeval *b)
-{
-	return (a->tv_sec - b->tv_sec) + (a->tv_usec - b->tv_usec) / (double) USEC_PER_SEC;
 }
 
 static int get_syslog_buffer_size(void)

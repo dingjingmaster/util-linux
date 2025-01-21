@@ -8,7 +8,7 @@ configure_file(
   output : 'libsmartcols.h',
   configuration : defs,
   install : build_libsmartcols,
-  install_dir : join_paths(get_option('includedir'), 'libsmartcols'),
+  install_dir : get_option('includedir') / 'libsmartcols',
 )
 
 scols_bison = generator(
@@ -73,4 +73,6 @@ if build_libsmartcols
   endif
 endif
 
-manadocs += ['libsmartcols/scols-filter.5.adoc']
+if build_libsmartcols
+  manadocs += ['libsmartcols/scols-filter.5.adoc']
+endif

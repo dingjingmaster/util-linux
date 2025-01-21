@@ -37,6 +37,8 @@
 #include <linux/sock_diag.h>
 # include <linux/unix_diag.h> /* for UNIX domain sockets */
 #include <linux/sockios.h>  /* SIOCGSKNS */
+#include <linux/vm_sockets.h>
+#include <linux/vm_sockets_diag.h> /* vsock_diag_req/vsock_diag_msg */
 #include <mqueue.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -73,6 +75,9 @@
 #define EXIT_EPROTONOSUPPORT 20
 #define EXIT_EACCES 21
 #define EXIT_ENOENT 22
+#define EXIT_ENOSYS 23
+#define EXIT_EADDRNOTAVAIL 24
+#define EXIT_ENODEV 25
 
 #define _U_ __attribute__((__unused__))
 
@@ -88,6 +93,7 @@ static void __attribute__((__noreturn__)) usage(FILE *out, int status)
 	fputs(" -a, --is-available <factory>  exit 0 if the factory is available\n", out);
 	fputs(" -l, --list                    list available file descriptor factories and exit\n", out);
 	fputs(" -I, --parameters <factory>    list parameters the factory takes\n", out);
+	fputs(" -O, --output-values <factory> list output values the factory prints\n", out);
 	fputs(" -r, --comm <name>             rename self\n", out);
 	fputs(" -q, --quiet                   don't print pid(s)\n", out);
 	fputs(" -X, --dont-monitor-stdin      don't monitor stdin when pausing\n", out);
@@ -328,11 +334,14 @@ struct factory {
 #define MAX_N 13
 	int  N;			/* the number of fds this factory makes */
 	int  EX_N;		/* fds made optionally */
-	int  EX_R;		/* the number of extra words printed to stdout. */
+	int  EX_O;		/* the number of extra words printed to stdout. */
 	void *(*make)(const struct factory *, struct fdesc[], int, char **);
 	void (*free)(const struct factory *, void *);
 	void (*report)(const struct factory *, int, void *, FILE *);
 	const struct parameter * params;
+	const char **o_descs;	/* string array describing values printed
+				 * to stdout. Used in -O option.
+				 * EX_O elements are expected. */
 };
 
 static void close_fdesc(int fd, void *data _U_)
@@ -346,6 +355,14 @@ static void abort_with_child_death_message(int signum _U_)
 	const char msg[] = "the child process exits unexpectedly";
 	unused_result_ok = write(2, msg, sizeof(msg));
 	_exit(EXIT_FAILURE);
+}
+
+static void reserve_fd(int fd)
+{
+	(void)close(fd);
+	if (dup2(0, fd) < 0)
+		errx(EXIT_FAILURE,
+		     "faild to reserve fd with dup2(%d, %d)", 0, fd);
 }
 
 static void *open_ro_regular_file(const struct factory *factory, struct fdesc fdescs[],
@@ -362,9 +379,6 @@ static void *open_ro_regular_file(const struct factory *factory, struct fdesc fd
 
 	if (ARG_INTEGER(offset) != 0) {
 		if (lseek(fd, (off_t)ARG_INTEGER(offset), SEEK_CUR) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to seek 0 -> %ld", ARG_INTEGER(offset));
 		}
 	}
@@ -372,9 +386,6 @@ static void *open_ro_regular_file(const struct factory *factory, struct fdesc fd
 
 	if (ARG_BOOLEAN(lease_r)) {
 		if (fcntl(fd, F_SETLEASE, F_RDLCK) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to take out a read lease");
 		}
 	}
@@ -382,9 +393,6 @@ static void *open_ro_regular_file(const struct factory *factory, struct fdesc fd
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -407,19 +415,17 @@ static void unlink_and_close_fdesc(int fd, void *data)
 	close(fd);
 }
 
-typedef void (*lockFn)(int fd, const char *fname, int dupfd);
+typedef void (*lockFn)(int fd, const char *fname);
 
-static void lock_fn_none(int fd _U_, const char *fname _U_, int dupfd _U_)
+static void lock_fn_none(int fd _U_, const char *fname _U_)
 {
 	/* Do nothing */
 }
 
-static void lock_fn_flock_sh(int fd, const char *fname, int dupfd)
+static void lock_fn_flock_sh(int fd, const char *fname)
 {
 	if (flock(fd, LOCK_SH) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -427,12 +433,10 @@ static void lock_fn_flock_sh(int fd, const char *fname, int dupfd)
 	}
 }
 
-static void lock_fn_flock_ex(int fd, const char *fname, int dupfd)
+static void lock_fn_flock_ex(int fd, const char *fname)
 {
 	if (flock(fd, LOCK_EX) < 0)  {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -440,7 +444,7 @@ static void lock_fn_flock_ex(int fd, const char *fname, int dupfd)
 	}
 }
 
-static void lock_fn_posix_r_(int fd, const char *fname, int dupfd)
+static void lock_fn_posix_r_(int fd, const char *fname)
 {
 	struct flock r = {
 		.l_type = F_RDLCK,
@@ -450,8 +454,6 @@ static void lock_fn_posix_r_(int fd, const char *fname, int dupfd)
 	};
 	if (fcntl(fd, F_SETLK, &r) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -459,7 +461,7 @@ static void lock_fn_posix_r_(int fd, const char *fname, int dupfd)
 	}
 }
 
-static void lock_fn_posix__w(int fd, const char *fname, int dupfd)
+static void lock_fn_posix__w(int fd, const char *fname)
 {
 	struct flock w = {
 		.l_type = F_WRLCK,
@@ -469,8 +471,6 @@ static void lock_fn_posix__w(int fd, const char *fname, int dupfd)
 	};
 	if (fcntl(fd, F_SETLK, &w) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -478,7 +478,7 @@ static void lock_fn_posix__w(int fd, const char *fname, int dupfd)
 	}
 }
 
-static void lock_fn_posix_rw(int fd, const char *fname, int dupfd)
+static void lock_fn_posix_rw(int fd, const char *fname)
 {
 	struct flock r = {
 		.l_type = F_RDLCK,
@@ -494,8 +494,6 @@ static void lock_fn_posix_rw(int fd, const char *fname, int dupfd)
 	};
 	if (fcntl(fd, F_SETLK, &r) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -503,8 +501,6 @@ static void lock_fn_posix_rw(int fd, const char *fname, int dupfd)
 	}
 	if (fcntl(fd, F_SETLK, &w) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -513,7 +509,7 @@ static void lock_fn_posix_rw(int fd, const char *fname, int dupfd)
 }
 
 #ifdef F_OFD_SETLK
-static void lock_fn_ofd_r_(int fd, const char *fname, int dupfd)
+static void lock_fn_ofd_r_(int fd, const char *fname)
 {
 	struct flock r = {
 		.l_type = F_RDLCK,
@@ -524,8 +520,6 @@ static void lock_fn_ofd_r_(int fd, const char *fname, int dupfd)
 	};
 	if (fcntl(fd, F_OFD_SETLK, &r) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -533,7 +527,7 @@ static void lock_fn_ofd_r_(int fd, const char *fname, int dupfd)
 	}
 }
 
-static void lock_fn_ofd__w(int fd, const char *fname, int dupfd)
+static void lock_fn_ofd__w(int fd, const char *fname)
 {
 	struct flock w = {
 		.l_type = F_WRLCK,
@@ -544,8 +538,6 @@ static void lock_fn_ofd__w(int fd, const char *fname, int dupfd)
 	};
 	if (fcntl(fd, F_OFD_SETLK, &w) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -553,7 +545,7 @@ static void lock_fn_ofd__w(int fd, const char *fname, int dupfd)
 	}
 }
 
-static void lock_fn_ofd_rw(int fd, const char *fname, int dupfd)
+static void lock_fn_ofd_rw(int fd, const char *fname)
 {
 	struct flock r = {
 		.l_type = F_RDLCK,
@@ -571,8 +563,6 @@ static void lock_fn_ofd_rw(int fd, const char *fname, int dupfd)
 	};
 	if (fcntl(fd, F_OFD_SETLK, &r) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -580,8 +570,6 @@ static void lock_fn_ofd_rw(int fd, const char *fname, int dupfd)
 	}
 	if (fcntl(fd, F_OFD_SETLK, &w) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -590,12 +578,10 @@ static void lock_fn_ofd_rw(int fd, const char *fname, int dupfd)
 }
 #endif	/* F_OFD_SETLK */
 
-static void lock_fn_lease_w(int fd, const char *fname, int dupfd)
+static void lock_fn_lease_w(int fd, const char *fname)
 {
 	if (fcntl(fd, F_SETLEASE, F_WRLCK) < 0) {
 		int e = errno;
-		close(fd);
-		close(dupfd);
 		if (fname)
 			unlink(fname);
 		errno = e;
@@ -693,9 +679,7 @@ static void *make_w_regular_file(const struct factory *factory, struct fdesc fde
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
 			int e = errno;
-			close(fd);
 			unlink(fname);
-			free(fname);
 			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
@@ -705,9 +689,6 @@ static void *make_w_regular_file(const struct factory *factory, struct fdesc fde
 
 	if (bDelete) {
 		if (unlink(fname) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to unlink %s", fname);
 		}
 		free(fname);
@@ -717,7 +698,6 @@ static void *make_w_regular_file(const struct factory *factory, struct fdesc fde
 	for (int i = 0; i < iWrite_bytes; i++) {
 		if (write(fd, "z", 1) != 1) {
 			int e = errno;
-			close(fd);
 			if (fname)
 				unlink(fname);
 			errno = e;
@@ -728,17 +708,15 @@ static void *make_w_regular_file(const struct factory *factory, struct fdesc fde
 	if (iDupfd >= 0) {
 		if (dup2(fd, iDupfd) < 0) {
 			int e = errno;
-			close(fd);
 			if (fname)
 				unlink(fname);
 			errno = e;
 			err(EXIT_FAILURE, "failed in dup2");
 		}
-		data = xmalloc(sizeof(iDupfd));
-		*((int *)data) = iDupfd;
+		data = xmemdup(&iDupfd, sizeof(iDupfd));
 	}
 
-	lock_fn(fd, fname, iDupfd);
+	lock_fn(fd, fname);
 
 	fdescs[0] = (struct fdesc){
 		.fd    = fdescs[0].fd,
@@ -779,6 +757,13 @@ static void *make_pipe(const struct factory *factory, struct fdesc fdescs[],
 	xpd [0] = ARG_INTEGER(rdup);
 	xpd [1] = ARG_INTEGER(wdup);
 
+	/* Reserve the fd */
+	for (int i = 0; i < 2; i++) {
+		if (xpd[i] < 0)
+			continue;
+		reserve_fd(xpd[i]);
+	}
+
 	for (int i = 0; i < 2; i++) {
 		if (ARG_STRING(nonblock)[i] == '-')
 			continue;
@@ -800,10 +785,6 @@ static void *make_pipe(const struct factory *factory, struct fdesc fdescs[],
 		if (nonblock_flags[i]) {
 			int flags = fcntl(pd[i], F_GETFL);
 			if (fcntl(pd[i], F_SETFL, flags|O_NONBLOCK) < 0) {
-				int e = errno;
-				close(pd[0]);
-				close(pd[1]);
-				errno = e;
 				errx(EXIT_FAILURE, "failed to set NONBLOCK flag to the %s fd",
 				     (i == 0)? "read": "write");
 			}
@@ -813,10 +794,6 @@ static void *make_pipe(const struct factory *factory, struct fdesc fdescs[],
 	for (int i = 0; i < 2; i++) {
 		if (pd[i] != fdescs[i].fd) {
 			if (dup2(pd[i], fdescs[i].fd) < 0) {
-				int e = errno;
-				close(pd[0]);
-				close(pd[1]);
-				errno = e;
 				err(EXIT_FAILURE, "failed to dup %d -> %d",
 				    pd[i], fdescs[i].fd);
 			}
@@ -833,12 +810,6 @@ static void *make_pipe(const struct factory *factory, struct fdesc fdescs[],
 	for (int i = 0; i < 2; i++) {
 		if (xpd[i] >= 0) {
 			if (dup2(fdescs[i].fd, xpd[i]) < 0) {
-				int e = errno;
-				close(fdescs[0].fd);
-				close(fdescs[1].fd);
-				if (i > 0 && xpd[0] >= 0)
-					close(xpd[0]);
-				errno = e;
 				err(EXIT_FAILURE, "failed to dup %d -> %d",
 				    fdescs[i].fd, xpd[i]);
 			}
@@ -876,9 +847,6 @@ static void *open_directory(const struct factory *factory, struct fdesc fdescs[]
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -887,17 +855,11 @@ static void *open_directory(const struct factory *factory, struct fdesc fdescs[]
 	if (ARG_INTEGER(dentries) > 0) {
 		dp = fdopendir(fdescs[0].fd);
 		if (dp == NULL) {
-			int e = errno;
-			close(fdescs[0].fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to make DIR* from fd: %s", ARG_STRING(dir));
 		}
 		for (int i = 0; i < ARG_INTEGER(dentries); i++) {
 			struct dirent *d = readdir(dp);
 			if (!d) {
-				int e = errno;
-				closedir(dp);
-				errno = e;
 				err(EXIT_FAILURE, "failed in readdir(3)");
 			}
 		}
@@ -924,9 +886,6 @@ static void *open_rw_chrdev(const struct factory *factory, struct fdesc fdescs[]
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -980,10 +939,6 @@ static void *make_socketpair(const struct factory *factory, struct fdesc fdescs[
 	for (int i = 0; i < 2; i++) {
 		if (sd[i] != fdescs[i].fd) {
 			if (dup2(sd[i], fdescs[i].fd) < 0) {
-				int e = errno;
-				close(sd[0]);
-				close(sd[1]);
-				errno = e;
 				err(EXIT_FAILURE, "failed to dup %d -> %d",
 				    sd[i], fdescs[i].fd);
 			}
@@ -1010,9 +965,6 @@ static void *open_with_opath(const struct factory *factory, struct fdesc fdescs[
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -1038,9 +990,6 @@ static void *open_ro_blkdev(const struct factory *factory, struct fdesc fdescs[]
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -1067,20 +1016,14 @@ static int make_packet_socket(int socktype, const char *interface)
 	if (interface == NULL)
 		return sd;	/* Just making a socket */
 
-	memset(&addr, 0, sizeof(struct sockaddr_ll));
+	memset(&addr, 0, sizeof(addr));
 	addr.sll_family = AF_PACKET;
 	addr.sll_ifindex = if_nametoindex(interface);
 	if (addr.sll_ifindex == 0) {
-		int e = errno;
-		close(sd);
-		errno = e;
 		err(EXIT_FAILURE,
 		    "failed to get the interface index for %s", interface);
 	}
-	if (bind(sd, (struct sockaddr *)&addr, sizeof(struct sockaddr_ll)) < 0) {
-		int e = errno;
-		close(sd);
-		errno = e;
+	if (bind(sd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		err(EXIT_FAILURE,
 		    "failed to get the interface index for %s", interface);
 	}
@@ -1138,9 +1081,6 @@ static void *make_mmapped_packet_socket(const struct factory *factory, struct fd
 	req.tp_block_nr = 1;
 	req.tp_frame_nr = 1;
 	if (setsockopt(sd, SOL_PACKET, PACKET_TX_RING, (char *)&req, sizeof(req)) < 0) {
-		int e = errno;
-		close(sd);
-		errno = e;
 		err((errno == ENOPROTOOPT? EXIT_ENOPROTOOPT: EXIT_FAILURE),
 		    "failed to specify a buffer spec to a packet socket");
 	}
@@ -1149,20 +1089,11 @@ static void *make_mmapped_packet_socket(const struct factory *factory, struct fd
 	munmap_data->len = (size_t) req.tp_block_size * req.tp_block_nr;
 	munmap_data->ptr = mmap(NULL, munmap_data->len, PROT_WRITE, MAP_SHARED, sd, 0);
 	if (munmap_data->ptr == MAP_FAILED) {
-		int e = errno;
-		close(sd);
-		free(munmap_data);
-		errno = e;
 		err(EXIT_FAILURE, "failed to do mmap a packet socket");
 	}
 
 	if (sd != fdescs[0].fd) {
 		if (dup2(sd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(sd);
-			munmap(munmap_data->ptr, munmap_data->len);
-			free(munmap_data);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", sd, fdescs[0].fd);
 		}
 		close(sd);
@@ -1190,9 +1121,6 @@ static void *make_pidfd(const struct factory *factory, struct fdesc fdescs[],
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -1220,26 +1148,17 @@ static void *make_inotify_fd(const struct factory *factory _U_, struct fdesc fde
 		err(EXIT_FAILURE, "failed in inotify_init()");
 
 	if (inotify_add_watch(fd, sdir, IN_DELETE) < 0) {
-		int e = errno;
-		close(fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in inotify_add_watch(\"%s\")", sdir);
 	}
 	free_arg(&dir);
 
 	if (inotify_add_watch(fd, sfile, IN_DELETE) < 0) {
-		int e = errno;
-		close(fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in inotify_add_watch(\"%s\")", sfile);
 	}
 	free_arg(&file);
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -1312,9 +1231,6 @@ static void *make_unix_stream_core(const struct factory *factory, struct fdesc f
 		    "failed to make a socket with AF_UNIX + SOCK_%s (server side)", typestr);
 	if (ssd != fdescs[0].fd) {
 		if (dup2(ssd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", ssd, fdescs[0].fd);
 		}
 		close(ssd);
@@ -1330,9 +1246,6 @@ static void *make_unix_stream_core(const struct factory *factory, struct fdesc f
 	if (!babstract)
 		unlink(un.sun_path);
 	if (bind(ssd, (const struct sockaddr *)&un, un_len) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to bind a socket for listening");
 	}
 
@@ -1352,7 +1265,6 @@ static void *make_unix_stream_core(const struct factory *factory, struct fdesc f
 	if (csd != fdescs[1].fd) {
 		if (dup2(csd, fdescs[1].fd) < 0) {
 			int e = errno;
-			close(csd);
 			close_unix_socket(ssd, fdescs[0].data);
 			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", csd, fdescs[1].fd);
@@ -1369,7 +1281,6 @@ static void *make_unix_stream_core(const struct factory *factory, struct fdesc f
 
 	if (connect(csd, (const struct sockaddr *)&un, un_len) < 0) {
 		int e = errno;
-		close_fdesc(csd, NULL);
 		close_unix_socket(ssd, fdescs[0].data);
 		errno = e;
 		err(EXIT_FAILURE, "failed to connect a socket to the listening socket");
@@ -1381,7 +1292,6 @@ static void *make_unix_stream_core(const struct factory *factory, struct fdesc f
 	asd = accept(ssd, NULL, NULL);
 	if (asd < 0) {
 		int e = errno;
-		close_fdesc(csd, NULL);
 		close_unix_socket(ssd, fdescs[0].data);
 		errno = e;
 		err(EXIT_FAILURE, "failed to accept a socket from the listening socket");
@@ -1389,8 +1299,6 @@ static void *make_unix_stream_core(const struct factory *factory, struct fdesc f
 	if (asd != fdescs[2].fd) {
 		if (dup2(asd, fdescs[2].fd) < 0) {
 			int e = errno;
-			close(asd);
-			close_fdesc(csd, NULL);
 			close_unix_socket(ssd, fdescs[0].data);
 			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", asd, fdescs[2].fd);
@@ -1467,9 +1375,6 @@ static void *make_unix_dgram(const struct factory *factory, struct fdesc fdescs[
 		    "failed to make a socket with AF_UNIX + SOCK_DGRAM (server side)");
 	if (ssd != fdescs[0].fd) {
 		if (dup2(ssd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", ssd, fdescs[0].fd);
 		}
 		close(ssd);
@@ -1485,9 +1390,6 @@ static void *make_unix_dgram(const struct factory *factory, struct fdesc fdescs[
 	if (!babstract)
 		unlink(un.sun_path);
 	if (bind(ssd, (const struct sockaddr *)&un, un_len) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to bind a socket for server");
 	}
 
@@ -1500,7 +1402,6 @@ static void *make_unix_dgram(const struct factory *factory, struct fdesc fdescs[
 	if (csd != fdescs[1].fd) {
 		if (dup2(csd, fdescs[1].fd) < 0) {
 			int e = errno;
-			close(csd);
 			close_unix_socket(ssd, fdescs[0].data);
 			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", csd, fdescs[1].fd);
@@ -1517,7 +1418,6 @@ static void *make_unix_dgram(const struct factory *factory, struct fdesc fdescs[
 
 	if (connect(csd, (const struct sockaddr *)&un, un_len) < 0) {
 		int e = errno;
-		close_fdesc(csd, NULL);
 		close_unix_socket(ssd, fdescs[0].data);
 		errno = e;
 		err(EXIT_FAILURE, "failed to connect a socket to the server socket");
@@ -1559,9 +1459,6 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 		typesym = SOCK_DGRAM;
 		typestr = "DGRAM";
 	} else {
-		free_arg(&abstract);
-		free_arg(&path);
-		free_arg(&type);
 		errx(EXIT_FAILURE, "unknown unix socket type: %s", stype);
 	}
 
@@ -1584,9 +1481,6 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 		err(EXIT_FAILURE, "failed to open /proc/self/ns/net");
 	if (self_netns != fdescs[0].fd) {
 		if (dup2(self_netns, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(self_netns);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", self_netns, fdescs[0].fd);
 		}
 		close(self_netns);
@@ -1600,26 +1494,16 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 	};
 
 	if (unshare(CLONE_NEWNET) < 0) {
-		int e = errno;
-		close_fdesc(self_netns, NULL);
-		errno = e;
 		err((errno == EPERM? EXIT_EPERM: EXIT_FAILURE),
 		    "failed in unshare");
 	}
 
 	tmp_netns = open("/proc/self/ns/net", O_RDONLY);
 	if (tmp_netns < 0) {
-		int e = errno;
-		close_fdesc(self_netns, NULL);
-		errno = e;
 		err(EXIT_FAILURE, "failed to open /proc/self/ns/net for the new netns");
 	}
 	if (tmp_netns != fdescs[1].fd) {
 		if (dup2(tmp_netns, fdescs[1].fd) < 0) {
-			int e = errno;
-			close_fdesc(self_netns, NULL);
-			close(tmp_netns);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", tmp_netns, fdescs[1].fd);
 		}
 		close(tmp_netns);
@@ -1634,10 +1518,6 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 
 	sd = socket(AF_UNIX, typesym, 0);
 	if (sd < 0) {
-		int e = errno;
-		close_fdesc(self_netns, NULL);
-		close_fdesc(tmp_netns, NULL);
-		errno = e;
 		err(EXIT_FAILURE,
 		    "failed to make a socket with AF_UNIX + SOCK_%s",
 		    typestr);
@@ -1645,11 +1525,6 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 
 	if (sd != fdescs[2].fd) {
 		if (dup2(sd, fdescs[2].fd) < 0) {
-			int e = errno;
-			close_fdesc(self_netns, NULL);
-			close_fdesc(tmp_netns, NULL);
-			close(sd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", sd, fdescs[2].fd);
 		}
 		close(sd);
@@ -1665,11 +1540,6 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 	if (!babstract)
 		unlink(un.sun_path);
 	if (bind(sd, (const struct sockaddr *)&un, un_len) < 0) {
-		int e = errno;
-		close_fdesc(self_netns, NULL);
-		close_fdesc(tmp_netns, NULL);
-		close_unix_socket(sd, NULL);
-		errno = e;
 		err(EXIT_FAILURE, "failed to bind a socket");
 	}
 
@@ -1679,8 +1549,6 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 	if (typesym != SOCK_DGRAM) {
 		if (listen(sd, 1) < 0) {
 			int e = errno;
-			close_fdesc(self_netns, NULL);
-			close_fdesc(tmp_netns, NULL);
 			close_unix_socket(sd, fdescs[2].data);
 			errno = e;
 			err(EXIT_FAILURE, "failed to listen a socket");
@@ -1689,11 +1557,9 @@ static void *make_unix_in_new_netns(const struct factory *factory, struct fdesc 
 
 	if (setns(self_netns, CLONE_NEWNET) < 0) {
 		int e = errno;
-		close_fdesc(self_netns, NULL);
-		close_fdesc(tmp_netns, NULL);
 		close_unix_socket(sd, fdescs[2].data);
 		errno = e;
-		err(EXIT_FAILURE, "failed to swich back to the original net namespace");
+		err(EXIT_FAILURE, "failed to switch back to the original net namespace");
 	}
 
 	return NULL;
@@ -1725,17 +1591,11 @@ static void *make_tcp_common(const struct factory *factory, struct fdesc fdescs[
 
 	if (setsockopt(ssd, SOL_SOCKET,
 		       SO_REUSEADDR, (const char *)&y, sizeof(y)) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to setsockopt(SO_REUSEADDR)");
 	}
 
 	if (ssd != fdescs[0].fd) {
 		if (dup2(ssd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", ssd, fdescs[0].fd);
 		}
 		close(ssd);
@@ -1744,43 +1604,26 @@ static void *make_tcp_common(const struct factory *factory, struct fdesc fdescs[
 
 	init_addr(sin, iserver_port);
 	if (bind(ssd, sin, addr_size) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to bind a listening socket");
 	}
 
 	if (listen(ssd, 1) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to listen a socket");
 	}
 
 	csd = socket(family, SOCK_STREAM, 0);
 	if (csd < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE,
 		    "failed to make a tcp client socket");
 	}
 
 	if (setsockopt(csd, SOL_SOCKET,
 		       SO_REUSEADDR, (const char *)&y, sizeof(y)) < 0) {
-		int e = errno;
-		close(ssd);
-		close(csd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to setsockopt(SO_REUSEADDR)");
 	}
 
 	if (csd != fdescs[1].fd) {
 		if (dup2(csd, fdescs[1].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			close(csd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", csd, fdescs[1].fd);
 		}
 		close(csd);
@@ -1789,35 +1632,19 @@ static void *make_tcp_common(const struct factory *factory, struct fdesc fdescs[
 
 	init_addr(cin, iclient_port);
 	if (bind(csd, cin, addr_size) < 0) {
-		int e = errno;
-		close(ssd);
-		close(csd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to bind a client socket");
 	}
 
 	if (connect(csd, sin, addr_size) < 0) {
-		int e = errno;
-		close(ssd);
-		close(csd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to connect a client socket to the server socket");
 	}
 
 	asd = accept(ssd, NULL, NULL);
 	if (asd < 0) {
-		int e = errno;
-		close(ssd);
-		close(csd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to accept a socket from the listening socket");
 	}
 	if (asd != fdescs[2].fd) {
 		if (dup2(asd, fdescs[2].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			close(csd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", asd, fdescs[2].fd);
 		}
 		close(asd);
@@ -1902,17 +1729,11 @@ static void *make_udp_common(const struct factory *factory, struct fdesc fdescs[
 
 	if (setsockopt(ssd, SOL_SOCKET,
 		       SO_REUSEADDR, (const char *)&y, sizeof(y)) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to setsockopt(SO_REUSEADDR)");
 	}
 
 	if (ssd != fdescs[0].fd) {
 		if (dup2(ssd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", ssd, fdescs[0].fd);
 		}
 		close(ssd);
@@ -1922,37 +1743,23 @@ static void *make_udp_common(const struct factory *factory, struct fdesc fdescs[
 	init_addr(sin, iserver_port);
 	if (bserver_do_bind) {
 		if (bind(ssd, sin, addr_size) < 0) {
-			int e = errno;
-			close(ssd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to bind a server socket");
 		}
 	}
 
 	csd = socket(family, SOCK_DGRAM, blite? IPPROTO_UDPLITE: 0);
 	if (csd < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE,
 		    "failed to make a udp client socket");
 	}
 
 	if (setsockopt(csd, SOL_SOCKET,
 		       SO_REUSEADDR, (const char *)&y, sizeof(y)) < 0) {
-		int e = errno;
-		close(ssd);
-		close(csd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to setsockopt(SO_REUSEADDR)");
 	}
 
 	if (csd != fdescs[1].fd) {
 		if (dup2(csd, fdescs[1].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			close(csd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", csd, fdescs[1].fd);
 		}
 		close(csd);
@@ -1962,20 +1769,12 @@ static void *make_udp_common(const struct factory *factory, struct fdesc fdescs[
 	if (bclient_do_bind) {
 		init_addr(cin, iclient_port);
 		if (bind(csd, cin, addr_size) < 0) {
-			int e = errno;
-			close(ssd);
-			close(csd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to bind a client socket");
 		}
 	}
 
 	if (bclient_do_connect) {
 		if (connect(csd, sin, addr_size) < 0) {
-			int e = errno;
-			close(ssd);
-			close(csd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to connect a client socket to the server socket");
 		}
 	}
@@ -2024,9 +1823,6 @@ static void *make_raw_common(const struct factory *factory, struct fdesc fdescs[
 
 	if (ssd != fdescs[0].fd) {
 		if (dup2(ssd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(ssd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", ssd, fdescs[0].fd);
 		}
 		close(ssd);
@@ -2035,17 +1831,11 @@ static void *make_raw_common(const struct factory *factory, struct fdesc fdescs[
 
 	init_addr(sin, false);
 	if (bind(ssd, sin, addr_size) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in bind(2)");
 	}
 
 	init_addr(sin, true);
 	if (connect(ssd, sin, addr_size) < 0) {
-		int e = errno;
-		close(ssd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in connect(2)");
 	}
 
@@ -2105,9 +1895,6 @@ static void *make_ping_common(const struct factory *factory, struct fdesc fdescs
 
 	if (sd != fdescs[0].fd) {
 		if (dup2(sd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(sd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", sd, fdescs[0].fd);
 		}
 		close(sd);
@@ -2117,9 +1904,6 @@ static void *make_ping_common(const struct factory *factory, struct fdesc fdescs
 	if (bbind) {
 		init_addr(sin, iid);
 		if (bind(sd, sin, addr_size) < 0) {
-			int e = errno;
-			close(sd);
-			errno = e;
 			err((errno == EACCES? EXIT_EACCES: EXIT_FAILURE),
 			    "failed in bind(2)");
 		}
@@ -2128,9 +1912,6 @@ static void *make_ping_common(const struct factory *factory, struct fdesc fdescs
 	if (bconnect) {
 		init_addr(sin, 0);
 		if (connect(sd, sin, addr_size) < 0) {
-			int e = errno;
-			close(sd);
-			errno = e;
 			err(EXIT_FAILURE, "failed in connect(2)");
 		}
 	}
@@ -2239,6 +2020,145 @@ static void *make_ping6(const struct factory *factory, struct fdesc fdescs[],
 				(struct sockaddr *)&in6);
 }
 
+#if HAVE_DECL_VMADDR_CID_LOCAL
+static void *make_vsock(const struct factory *factory, struct fdesc fdescs[],
+			int argc, char ** argv)
+{
+	struct sockaddr_vm svm;
+	struct sockaddr_vm cvm;
+
+	struct arg server_port = decode_arg("server-port", factory->params, argc, argv);
+	unsigned short iserver_port = (unsigned short)ARG_INTEGER(server_port);
+	struct arg client_port = decode_arg("client-port", factory->params, argc, argv);
+	unsigned short iclient_port = (unsigned short)ARG_INTEGER(client_port);
+	struct arg socktype = decode_arg("socktype", factory->params, argc, argv);
+	int isocktype;
+	int ssd, csd, asd = -1;
+
+	const int y = 1;
+
+	free_arg(&server_port);
+	free_arg(&client_port);
+
+	if (strcmp(ARG_STRING(socktype), "STREAM") == 0)
+		isocktype = SOCK_STREAM;
+	else if (strcmp(ARG_STRING(socktype), "DGRAM") == 0)
+		isocktype = SOCK_DGRAM;
+	else if (strcmp(ARG_STRING(socktype), "SEQPACKET") == 0)
+		isocktype = SOCK_SEQPACKET;
+	else
+		errx(EXIT_FAILURE,
+		     "unknown socket type for socket(AF_VSOCK,...): %s",
+		     ARG_STRING(socktype));
+	free_arg(&socktype);
+
+	ssd = socket(AF_VSOCK, isocktype, 0);
+	if (ssd < 0) {
+		if (errno == ENODEV)
+			err(EXIT_ENODEV, "failed to make a vsock socket for listening (maybe `modprobe vmw_vsock_vmci_transport'?)");
+		err(EXIT_FAILURE,
+		    "failed to make a vsock socket for listening");
+	}
+
+	if (setsockopt(ssd, SOL_SOCKET,
+		       SO_REUSEADDR, (const char *)&y, sizeof(y)) < 0) {
+		err(EXIT_FAILURE, "failed to setsockopt(SO_REUSEADDR)");
+	}
+
+	if (ssd != fdescs[0].fd) {
+		if (dup2(ssd, fdescs[0].fd) < 0) {
+			err(EXIT_FAILURE, "failed to dup %d -> %d", ssd, fdescs[0].fd);
+		}
+		close(ssd);
+		ssd = fdescs[0].fd;
+	}
+
+	memset(&svm, 0, sizeof(svm));
+	svm.svm_family = AF_VSOCK;
+	svm.svm_port = iserver_port;
+	svm.svm_cid = VMADDR_CID_LOCAL;
+
+	memset(&cvm, 0, sizeof(svm));
+	cvm.svm_family = AF_VSOCK;
+	cvm.svm_port = iclient_port;
+	cvm.svm_cid = VMADDR_CID_LOCAL;
+
+	if (bind(ssd, (struct sockaddr *)&svm, sizeof(svm)) < 0) {
+		if (errno == EADDRNOTAVAIL)
+			err(EXIT_EADDRNOTAVAIL, "failed to bind a listening socket (maybe `modprobe vsock_loopback'?)");
+		err(EXIT_FAILURE, "failed to bind a listening socket");
+	}
+
+
+	if (isocktype == SOCK_DGRAM) {
+		if (connect(ssd, (struct sockaddr *)&cvm, sizeof(cvm)) < 0)
+			err(EXIT_FAILURE, "failed to connect the server socket to a client socket");
+	} else {
+		if (listen(ssd, 1) < 0)
+			err(EXIT_FAILURE, "failed to listen a socket");
+	}
+
+	csd = socket(AF_VSOCK, isocktype, 0);
+	if (csd < 0) {
+		err(EXIT_FAILURE,
+		    "failed to make a vsock client socket");
+	}
+
+	if (setsockopt(csd, SOL_SOCKET,
+		       SO_REUSEADDR, (const char *)&y, sizeof(y)) < 0) {
+		err(EXIT_FAILURE, "failed to setsockopt(SO_REUSEADDR)");
+	}
+
+	if (csd != fdescs[1].fd) {
+		if (dup2(csd, fdescs[1].fd) < 0) {
+			err(EXIT_FAILURE, "failed to dup %d -> %d", csd, fdescs[1].fd);
+		}
+		close(csd);
+		csd = fdescs[1].fd;
+	}
+
+	if (bind(csd, (struct sockaddr *)&cvm, sizeof(cvm)) < 0) {
+		err(EXIT_FAILURE, "failed to bind a client socket");
+	}
+
+	if (connect(csd, (struct sockaddr *)&svm, sizeof(svm)) < 0) {
+		err(EXIT_FAILURE, "failed to connect a client socket to the server socket");
+	}
+
+	if (isocktype != SOCK_DGRAM) {
+		asd = accept(ssd, NULL, NULL);
+		if (asd < 0) {
+			err(EXIT_FAILURE, "failed to accept a socket from the listening socket");
+		}
+		if (asd != fdescs[2].fd) {
+			if (dup2(asd, fdescs[2].fd) < 0) {
+				err(EXIT_FAILURE, "failed to dup %d -> %d", asd, fdescs[2].fd);
+			}
+			close(asd);
+			asd = fdescs[2].fd;
+		}
+	}
+
+	fdescs[0] = (struct fdesc) {
+		.fd    = fdescs[0].fd,
+		.close = close_fdesc,
+		.data  = NULL,
+	};
+	fdescs[1] = (struct fdesc) {
+		.fd    = fdescs[1].fd,
+		.close = close_fdesc,
+		.data  = NULL,
+	};
+
+	fdescs[2] = (struct fdesc) {
+		.fd    = (iserver_port == SOCK_DGRAM)? -1: fdescs[2].fd,
+		.close = close_fdesc,
+		.data  = NULL,
+	};
+	return NULL;
+}
+#endif	/* HAVE_DECL_VMADDR_CID_LOCAL */
+
 #ifdef SIOCGSKNS
 static void *make_netns(const struct factory *factory _U_, struct fdesc fdescs[],
 			int argc _U_, char ** argv _U_)
@@ -2254,9 +2174,6 @@ static void *make_netns(const struct factory *factory _U_, struct fdesc fdescs[]
 
 	if (ns != fdescs[0].fd) {
 		if (dup2(ns, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(ns);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", ns, fdescs[0].fd);
 		}
 		close(ns);
@@ -2290,9 +2207,6 @@ static void *make_netlink(const struct factory *factory, struct fdesc fdescs[],
 
 	if (sd != fdescs[0].fd) {
 		if (dup2(sd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(sd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", sd, fdescs[0].fd);
 		}
 		close(sd);
@@ -2304,9 +2218,6 @@ static void *make_netlink(const struct factory *factory, struct fdesc fdescs[],
 	nl.nl_family = AF_NETLINK;
 	nl.nl_groups = ugroups;
 	if (bind(sd, (struct sockaddr*)&nl, sizeof(nl)) < 0) {
-		int e = errno;
-		close(sd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in bind(2)");
 	}
 
@@ -2334,9 +2245,6 @@ static void *make_eventfd(const struct factory *factory _U_, struct fdesc fdescs
 
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
 		}
 		close(fd);
@@ -2349,19 +2257,12 @@ static void *make_eventfd(const struct factory *factory _U_, struct fdesc fdescs
 	};
 
 	if (dup2(fdescs[0].fd, fdescs[1].fd) < 0) {
-		int e = errno;
-		close(fdescs[0].fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed to dup %d -> %d", fdescs[0].fd, fdescs[1].fd);
 	}
 
 	signal(SIGCHLD, abort_with_child_death_message);
 	*pid = fork();
-	if (*pid < -1) {
-		int e = errno;
-		close(fdescs[0].fd);
-		close(fdescs[1].fd);
-		errno = e;
+	if (*pid < 0) {
 		err(EXIT_FAILURE, "failed in fork()");
 	} else if (*pid == 0) {
 		uint64_t v = 1;
@@ -2372,7 +2273,6 @@ static void *make_eventfd(const struct factory *factory _U_, struct fdesc fdescs
 		signal(SIGCONT, do_nothing);
 		/* Notify the parent that I'm ready. */
 		if (write(fdescs[1].fd, &v, sizeof(v)) != sizeof(v)) {
-			close(fdescs[1].fd);
 			err(EXIT_FAILURE,
 			    "failed in write() to notify the readiness to the prent");
 		}
@@ -2390,8 +2290,6 @@ static void *make_eventfd(const struct factory *factory _U_, struct fdesc fdescs
 
 		/* Wait till the child is ready. */
 		if (read(fdescs[0].fd, &v, sizeof(uint64_t)) != sizeof(v)) {
-			free(pid);
-			close(fdescs[0].fd);
 			err(EXIT_FAILURE,
 			    "failed in read() the readiness notification from the child");
 		}
@@ -2514,7 +2412,9 @@ static void *make_mqueue(const struct factory *factory, struct fdesc fdescs[],
 
 	fd = mq_open(mqueue_data->path, O_CREAT|O_EXCL | O_RDONLY, S_IRUSR | S_IWUSR, &attr);
 	if (fd < 0) {
+		int e = errno;
 		mqueue_data_free(mqueue_data);
+		errno = e;
 		err(EXIT_FAILURE, "failed in mq_open(3) for reading");
 	}
 
@@ -2522,7 +2422,6 @@ static void *make_mqueue(const struct factory *factory, struct fdesc fdescs[],
 	if (fd != fdescs[0].fd) {
 		if (dup2(fd, fdescs[0].fd) < 0) {
 			int e = errno;
-			mq_close(fd);
 			mqueue_data_free(mqueue_data);
 			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[0].fd);
@@ -2539,7 +2438,6 @@ static void *make_mqueue(const struct factory *factory, struct fdesc fdescs[],
 	fd = mq_open(mqueue_data->path, O_WRONLY, S_IRUSR | S_IWUSR, NULL);
 	if (fd < 0) {
 		int e = errno;
-		mq_close(fdescs[0].fd);
 		mqueue_data_free(mqueue_data);
 		errno = e;
 		err(EXIT_FAILURE, "failed in mq_open(3) for writing");
@@ -2547,10 +2445,6 @@ static void *make_mqueue(const struct factory *factory, struct fdesc fdescs[],
 
 	if (fd != fdescs[1].fd) {
 		if (dup2(fd, fdescs[1].fd) < 0) {
-			int e = errno;
-			mq_close(fd);
-			mq_close(fdescs[0].fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", fd, fdescs[1].fd);
 		}
 		mq_close(fd);
@@ -2563,10 +2457,8 @@ static void *make_mqueue(const struct factory *factory, struct fdesc fdescs[],
 
 	signal(SIGCHLD, abort_with_child_death_message);
 	mqueue_data->pid = fork();
-	if (mqueue_data->pid < -1) {
+	if (mqueue_data->pid < 0) {
 		int e = errno;
-		mq_close(fdescs[0].fd);
-		mq_close(fdescs[1].fd);
 		mqueue_data_free(mqueue_data);
 		errno = e;
 		err(EXIT_FAILURE, "failed in fork()");
@@ -2594,8 +2486,9 @@ static void *make_mqueue(const struct factory *factory, struct fdesc fdescs[],
 
 		/* Wait till the child is ready. */
 		if (mq_receive(fdescs[0].fd, &c, 1, NULL) < 0) {
-			mq_close(fdescs[0].fd);
+			int e = errno;
 			mqueue_data_free(mqueue_data);
+			errno = e;
 			err(EXIT_FAILURE,
 			    "failed in mq_receive() the readiness notification from the child");
 		}
@@ -2604,6 +2497,7 @@ static void *make_mqueue(const struct factory *factory, struct fdesc fdescs[],
 
 	return mqueue_data;
 }
+
 struct sysvshm_data {
 	void *addr;
 	int id;
@@ -2670,9 +2564,6 @@ static void *make_eventpoll(const struct factory *factory _U_, struct fdesc fdes
 		err(EXIT_FAILURE, "failed in epoll_create(2)");
 	if (efd != fdescs[0].fd) {
 		if (dup2(efd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(efd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", efd, fdescs[0].fd);
 		}
 		close(efd);
@@ -2687,22 +2578,11 @@ static void *make_eventpoll(const struct factory *factory _U_, struct fdesc fdes
 	for (size_t i = 1; i < ARRAY_SIZE(specs); i++) {
 		int fd = open(specs[i].file, specs[i].flag);
 		if (fd < 0) {
-			int e = errno;
-			close(efd);
-			for (size_t j = i - 1; j > 0; j--)
-				close(fdescs[j].fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed in open(\"%s\",...)",
 			    specs[i].file);
 		}
 		if (fd != fdescs[i].fd) {
 			if (dup2(fd, fdescs[i].fd) < 0) {
-				int e = errno;
-				close(efd);
-				for (size_t j = i - 1; j > 0; j--)
-					close(fdescs[j].fd);
-				close(fd);
-				errno = e;
 				err(EXIT_FAILURE, "failed to dup %d -> %d",
 				    fd, fdescs[i].fd);
 			}
@@ -2718,11 +2598,6 @@ static void *make_eventpoll(const struct factory *factory _U_, struct fdesc fdes
 				      .events = specs[i].events,
 				      .data = {.ptr = NULL,}
 			      }) < 0) {
-			int e = errno;
-			close(efd);
-			for (size_t j = i; j > 0; j--)
-				close(fdescs[j].fd);
-			errno = e;
 			err(EXIT_FAILURE,
 			    "failed to add fd %d to the eventpoll fd with epoll_ctl",
 			    fdescs[i].fd);
@@ -2777,7 +2652,7 @@ static void *make_timerfd(const struct factory *factory, struct fdesc fdescs[],
 	const char *sclockid = ARG_STRING(clockid_);
 	clockid_t clockid;
 
-	if (decode_clockid (sclockid, &clockid) == false)
+	if (decode_clockid(sclockid, &clockid) == false)
 		err(EXIT_FAILURE, "unknown clockid: %s", sclockid);
 
 	free_arg(&clockid_);
@@ -2786,11 +2661,8 @@ static void *make_timerfd(const struct factory *factory, struct fdesc fdescs[],
 	free_arg(&remaining);
 	free_arg(&abstime);
 
-	if (babstime) {
-		int r = clock_gettime(clockid, &now);
-		if (r == -1)
-			err(EXIT_FAILURE, "failed in clock_gettime(2)");
-	}
+	if (babstime && (clock_gettime(clockid, &now) == -1))
+		err(EXIT_FAILURE, "failed in clock_gettime(2)");
 
 	tfd = timerfd_create(clockid, 0);
 	if (tfd < 0)
@@ -2803,17 +2675,11 @@ static void *make_timerfd(const struct factory *factory, struct fdesc fdescs[],
 	tspec.it_interval.tv_nsec = uinterval_frac;
 
 	if (timerfd_settime(tfd, babstime? TFD_TIMER_ABSTIME: 0, &tspec, NULL) < 0) {
-		int e = errno;
-		close(tfd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in timerfd_settime(2)");
 	}
 
 	if (tfd != fdescs[0].fd) {
 		if (dup2(tfd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(tfd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", tfd, fdescs[0].fd);
 		}
 		close(tfd);
@@ -2849,9 +2715,6 @@ static void *make_signalfd(const struct factory *factory _U_, struct fdesc fdesc
 
 	if (sfd != fdescs[0].fd) {
 		if (dup2(sfd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(sfd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", sfd, fdescs[0].fd);
 		}
 		close(sfd);
@@ -2883,17 +2746,11 @@ static void *make_cdev_tun(const struct factory *factory _U_, struct fdesc fdesc
 	strcpy(ifr.ifr_name, "mkfds%d");
 
 	if (ioctl(tfd, TUNSETIFF, (void *) &ifr) < 0) {
-		int e = errno;
-		close(tfd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in setting \"lo\" to the tun device");
 	}
 
 	if (tfd != fdescs[0].fd) {
 		if (dup2(tfd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(tfd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", tfd, fdescs[0].fd);
 		}
 		close(tfd);
@@ -2945,6 +2802,8 @@ static void *make_bpf_prog(const struct factory *factory, struct fdesc fdescs[],
 		},
 	};
 
+	struct bpf_prog_info info = {};
+
 	memset(&attr, 0, sizeof(attr));
 	attr.prog_type = iprog_type_id;
 	attr.insns = (uint64_t)(unsigned long)insns;
@@ -2959,11 +2818,16 @@ static void *make_bpf_prog(const struct factory *factory, struct fdesc fdescs[],
 	if (bfd < 0)
 		err_nosys(EXIT_FAILURE, "failed in bpf(BPF_PROG_LOAD)");
 
+
+	memset(&attr, 0, sizeof(attr));
+	attr.info.bpf_fd = bfd;
+	attr.info.info_len = sizeof(info);
+	attr.info.info = (uint64_t)(unsigned long)&info;
+	if (syscall(SYS_bpf, BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr)) < 0)
+		err_nosys(EXIT_FAILURE, "failed in bpf(BPF_OBJ_GET_INFO_BY_FD)");
+
 	if (bfd != fdescs[0].fd) {
 		if (dup2(bfd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(bfd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", bfd, fdescs[0].fd);
 		}
 		close(bfd);
@@ -2975,7 +2839,38 @@ static void *make_bpf_prog(const struct factory *factory, struct fdesc fdescs[],
 		.data  = NULL
 	};
 
-	return NULL;
+	return xmemdup(&info, sizeof(info));
+}
+
+enum ritem_bpf_prog {
+	RITEM_BPF_PROG_ID,
+	RITEM_BPF_PROG_TAG,
+};
+
+static void report_bpf_prog(const struct factory *factory _U_,
+			    int nth, void *data, FILE *fp)
+{
+	struct bpf_prog_info *info = data;
+
+	switch (nth) {
+	case RITEM_BPF_PROG_ID:
+		fprintf(fp, "%u", info->id);
+		break;
+	case RITEM_BPF_PROG_TAG:
+		for (size_t i = 0; i < BPF_TAG_SIZE; i++) {
+			unsigned char ch = (info->tag[i] >> 4);
+			unsigned char cl = info->tag[i] & 0x0f;
+
+			fprintf(fp, "%x", (unsigned int)ch);
+			fprintf(fp, "%x", (unsigned int)cl);
+		}
+		break;
+	}
+}
+
+static void free_bpf_prog(const struct factory * factory _U_, void *data)
+{
+	free(data);
 }
 
 static void *make_some_pipes(const struct factory *factory _U_, struct fdesc fdescs[],
@@ -3062,9 +2957,6 @@ static void *make_bpf_map(const struct factory *factory, struct fdesc fdescs[],
 
 	if (bfd != fdescs[0].fd) {
 		if (dup2(bfd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(bfd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", bfd, fdescs[0].fd);
 		}
 		close(bfd);
@@ -3090,32 +2982,20 @@ static void *make_pty(const struct factory *factory _U_, struct fdesc fdescs[],
 		err(EXIT_FAILURE, "failed in opening /dev/ptmx");
 
 	if (unlockpt(ptmx_fd) < 0) {
-		int e = errno;
-		close(ptmx_fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in unlockpt()");
 	}
 
 	if (ioctl(ptmx_fd, TIOCGPTN, &index) < 0) {
-		int e = errno;
-		close(ptmx_fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in ioctl(TIOCGPTN)");
 	}
 
 	pts = ptsname(ptmx_fd);
 	if (pts == NULL) {
-		int e = errno;
-		close(ptmx_fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in ptsname()");
 	}
 
 	if (ptmx_fd != fdescs[0].fd) {
 		if (dup2(ptmx_fd, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(ptmx_fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", ptmx_fd, fdescs[0].fd);
 		}
 		close(ptmx_fd);
@@ -3124,18 +3004,11 @@ static void *make_pty(const struct factory *factory _U_, struct fdesc fdescs[],
 
 	pts_fd = open(pts, O_RDONLY);
 	if (pts_fd < 0) {
-		int e = errno;
-		close(ptmx_fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in opening %s", pts);
 	}
 
 	if (pts_fd != fdescs[1].fd) {
 		if (dup2(pts_fd, fdescs[1].fd) < 0) {
-			int e = errno;
-			close(pts_fd);
-			close(ptmx_fd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", pts_fd, fdescs[1].fd);
 		}
 		close(pts_fd);
@@ -3153,8 +3026,7 @@ static void *make_pty(const struct factory *factory _U_, struct fdesc fdescs[],
 		.data  = NULL
 	};
 
-	indexp = xmalloc(sizeof(index));
-	*indexp = index;
+	indexp = xmemdup(&index, sizeof(index));
 	return indexp;
 }
 
@@ -3190,16 +3062,10 @@ static void *make_mmap(const struct factory *factory, struct fdesc fdescs[] _U_,
 
 	struct stat sb;
 	if (fstat(fd, &sb) < 0) {
-		int e = errno;
-		close(fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in fstat()");
 	}
 	char *addr = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (addr == MAP_FAILED) {
-		int e = errno;
-		close(fd);
-		errno = e;
 		err(EXIT_FAILURE, "failed in mmap()");
 	}
 	close(fd);
@@ -3226,7 +3092,7 @@ static void map_root_user(uid_t uid, uid_t gid)
 		    "failed to open /proc/self/uid_map");
 	r = write (mapfd, buf, n);
 	if (r < 0)
-		err(EXIT_FAILURE,
+		err((errno == EPERM? EXIT_EPERM: EXIT_FAILURE),
 		    "failed to write to /proc/self/uid_map");
 	if (r != n)
 		errx(EXIT_FAILURE,
@@ -3278,18 +3144,12 @@ static void *make_userns(const struct factory *factory _U_, struct fdesc fdescs[
 		err(EXIT_FAILURE, "failed to open /proc/self/ns/user for the new user ns");
 
 	if (unshare(CLONE_NEWUSER) < 0) {
-		int e = errno;
-		close(userns);
-		errno = e;
 		err((errno == EPERM? EXIT_EPERM: EXIT_FAILURE),
 		    "failed in the 2nd unshare(2)");
 	}
 
 	if (userns != fdescs[0].fd) {
 		if (dup2(userns, fdescs[0].fd) < 0) {
-			int e = errno;
-			close(userns);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", userns, fdescs[0].fd);
 		}
 		close(userns);
@@ -3365,22 +3225,37 @@ static void *make_sockdiag(const struct factory *factory, struct fdesc fdescs[],
 	struct arg family = decode_arg("family", factory->params, argc, argv);
 	const char *sfamily = ARG_STRING(family);
 	int ifamily;
+	struct arg type = decode_arg("type", factory->params, argc, argv);
+	const char *stype = ARG_STRING(type);
+	int itype;
 	int diagsd;
 	void *req = NULL;
 	size_t reqlen = 0;
 	int e;
 	struct unix_diag_req udr;
+	struct vsock_diag_req vdr;
 
 	if (strcmp(sfamily, "unix") == 0)
 		ifamily = AF_UNIX;
+	else if (strcmp(sfamily, "vsock") == 0)
+		ifamily = AF_VSOCK;
 	else
 		errx(EXIT_FAILURE, "unknown/unsupported family: %s", sfamily);
-	free_arg(&family);
 
-	diagsd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_SOCK_DIAG);
+	if (strcmp(stype, "dgram") == 0)
+		itype = SOCK_DGRAM;
+	else if (strcmp(stype, "raw") == 0)
+		itype = SOCK_RAW;
+	else
+		errx(EXIT_FAILURE, "unknown/unsupported type: %s", stype);
+
+
+	diagsd = socket(AF_NETLINK, itype, NETLINK_SOCK_DIAG);
 	if (diagsd < 0)
 		err(errno == EPROTONOSUPPORT? EXIT_EPROTONOSUPPORT: EXIT_FAILURE,
-		    "failed in sendmsg()");
+		    "failed in socket(AF_NETLINK, %s, NETLINK_SOCK_DIAG)", stype);
+	free_arg(&family);
+	free_arg(&type);
 
 	if (ifamily == AF_UNIX) {
 		udr = (struct unix_diag_req) {
@@ -3390,6 +3265,13 @@ static void *make_sockdiag(const struct factory *factory, struct fdesc fdescs[],
 		};
 		req = &udr;
 		reqlen = sizeof(udr);
+	} else if (ifamily == AF_VSOCK) {
+		vdr = (struct vsock_diag_req) {
+			.sdiag_family = AF_VSOCK,
+			.vdiag_states = ~(uint32_t)0,
+		};
+		req = &vdr;
+		reqlen = sizeof(vdr);
 	}
 
 	e = send_diag_request(diagsd, req, reqlen);
@@ -3416,9 +3298,6 @@ static void *make_sockdiag(const struct factory *factory, struct fdesc fdescs[],
 
 	if (diagsd != fdescs[0].fd) {
 		if (dup2(diagsd, fdescs[0].fd) < 0) {
-			e = errno;
-			close(diagsd);
-			errno = e;
 			err(EXIT_FAILURE, "failed to dup %d -> %d", diagsd, fdescs[0].fd);
 		}
 		close(diagsd);
@@ -3431,6 +3310,68 @@ static void *make_sockdiag(const struct factory *factory, struct fdesc fdescs[],
 	};
 
 	return NULL;
+}
+
+static void *make_foreign_sockets(const struct factory *factory _U_, struct fdesc fdescs[],
+				  int argc _U_, char ** argv _U_)
+{
+	int foreign_sd[2];	/* These two */
+	int original_ns;
+	int foreign_ns;
+	struct stat foreign_ns_sb;
+
+	original_ns = open("/proc/self/ns/net", O_RDONLY);
+	if (original_ns < 0)
+		err(EXIT_FAILURE, "failed in open(/proc/self/ns/net) before unshare");
+
+	if (unshare(CLONE_NEWNET) < 0)
+		err((errno == EPERM? EXIT_EPERM: EXIT_FAILURE),
+		    "failed in unshare()");
+
+	foreign_ns = open("/proc/self/ns/net", O_RDONLY);
+	if (foreign_ns < 0)
+		err(EXIT_FAILURE, "failed in open(/proc/self/ns/net) after unshare");
+	if (fstat(foreign_ns, &foreign_ns_sb) < 0)
+			err(EXIT_FAILURE, "failed in fstat(NETNS)");
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, foreign_sd) < 0)
+		err(EXIT_FAILURE, "failed in socketpair(SOCK_STREAM)");
+
+	if (setns(original_ns, CLONE_NEWNET) < 0)
+		err(EXIT_FAILURE, "failed in setns()");
+
+	close(foreign_ns);	/* Make the namespace unreadable. */
+	close(original_ns);
+
+	for (int i = 0; i < 2; i++) {
+		if (foreign_sd[i] != fdescs[i].fd) {
+			if (dup2(foreign_sd[i], fdescs[i].fd) < 0)
+				err(EXIT_FAILURE, "failed to dup %d -> %d",
+				    foreign_sd[i], fdescs[i].fd);
+			close(foreign_sd[i]);
+		}
+		fdescs[i] = (struct fdesc){
+			.fd    = fdescs[i].fd,
+			.close = close_fdesc,
+			.data  = NULL
+		};
+	}
+
+	return xmemdup(&foreign_ns_sb.st_ino, sizeof(foreign_ns_sb.st_ino));
+}
+
+static void report_foreign_sockets(const struct factory *factory _U_,
+				   int nth, void *data, FILE *fp)
+{
+	if (nth == 0) {
+		long *netns_id = (long *)data;
+		fprintf(fp, "%ld", *netns_id);
+	}
+}
+
+static void free_foreign_sockets(const struct factory * factory _U_, void *data)
+{
+	free (data);
 }
 
 #define PARAM_END { .name = NULL, }
@@ -3495,7 +3436,7 @@ static const struct factory factories[] = {
 				.name = "readable",
 				.type = PTYPE_BOOLEAN,
 				.desc = "open the new file readable way",
-				.defv.string = false,
+				.defv.boolean = false,
 			},
 			{
 				.name = "lock",
@@ -4034,6 +3975,37 @@ static const struct factory factories[] = {
 			PARAM_END
 		}
 	},
+#if HAVE_DECL_VMADDR_CID_LOCAL
+	{
+		"vsock",
+		.desc = "AF_VSOCK sockets",
+		.priv = false,
+		.N    = 3,	/* NOTE: The 3rd one is not used if socktype is DGRAM. */
+		.EX_N = 0,
+		.make = make_vsock,
+		.params = (struct parameter []) {
+			{
+				.name = "socktype",
+				.type = PTYPE_STRING,
+				.desc = "STREAM, DGRAM, or SEQPACKET",
+				.defv.string = "STREAM",
+			},
+			{
+				.name = "server-port",
+				.type = PTYPE_INTEGER,
+				.desc = "VSOCK port the server may listen",
+				.defv.integer = 12345,
+			},
+			{
+				.name = "client-port",
+				.type = PTYPE_INTEGER,
+				.desc = "VSOCK port the client may bind",
+				.defv.integer = 23456,
+			},
+			PARAM_END
+		}
+	},
+#endif	/* HAVE_DECL_VMADDR_CID_LOCAL */
 #ifdef SIOCGSKNS
 	{
 		.name = "netns",
@@ -4076,13 +4048,16 @@ static const struct factory factories[] = {
 		.priv = false,
 		.N    = 2,
 		.EX_N = 0,
-		.EX_R = 1,
+		.EX_O = 1,
 		.make = make_eventfd,
 		.report = report_eventfd,
 		.free = free_eventfd,
 		.params = (struct parameter []) {
 			PARAM_END
-		}
+		},
+		.o_descs = (const char *[]){
+			"the pid of child process",
+		},
 	},
 	{
 		.name = "mqueue",
@@ -4090,7 +4065,7 @@ static const struct factory factories[] = {
 		.priv = false,
 		.N    = 2,
 		.EX_N = 0,
-		.EX_R = 1,
+		.EX_O = 1,
 		.make = make_mqueue,
 		.report = report_mqueue,
 		.free = free_mqueue,
@@ -4102,7 +4077,10 @@ static const struct factory factories[] = {
 				.defv.string = "/test_mkfds-mqueue",
 			},
 			PARAM_END
-		}
+		},
+		.o_descs = (const char *[]){
+			"the pid of the child process",
+		},
 	},
 	{
 		.name = "sysvshm",
@@ -4156,13 +4134,13 @@ static const struct factory factories[] = {
 			{
 				.name = "interval",
 				.type = PTYPE_UINTEGER,
-				.desc = "inteval in seconds",
+				.desc = "interval in seconds",
 				.defv.uinteger = 10,
 			},
 			{
 				.name = "interval-nanofrac",
 				.type = PTYPE_UINTEGER,
-				.desc = "nsec part of inteval",
+				.desc = "nsec part of interval",
 				.defv.uinteger = 0,
 			},
 
@@ -4186,13 +4164,16 @@ static const struct factory factories[] = {
 		.priv = true,
 		.N    = 1,
 		.EX_N = 0,
-		.EX_R = 1,
+		.EX_O = 1,
 		.make = make_cdev_tun,
 		.report = report_cdev_tun,
 		.free = free_cdev_tun,
 		.params = (struct parameter []) {
 			PARAM_END
-		}
+		},
+		.o_descs = (const char *[]){
+			"the network device name",
+		},
 	},
 	{
 		.name = "bpf-prog",
@@ -4200,7 +4181,10 @@ static const struct factory factories[] = {
 		.priv = true,
 		.N    = 1,
 		.EX_N = 0,
+		.EX_O = 2,
 		.make = make_bpf_prog,
+		.report = report_bpf_prog,
+		.free = free_bpf_prog,
 		.params = (struct parameter []) {
 			{
 				.name = "prog-type-id",
@@ -4215,7 +4199,11 @@ static const struct factory factories[] = {
 				.defv.string = "mkfds_bpf_prog",
 			},
 			PARAM_END
-		}
+		},
+		.o_descs = (const char *[]) {
+			[RITEM_BPF_PROG_ID]  = "the id of bpf prog object",
+			[RITEM_BPF_PROG_TAG] = "the tag of bpf prog object",
+		},
 	},
 	{
 		.name = "multiplexing",
@@ -4257,13 +4245,16 @@ static const struct factory factories[] = {
 		.priv = false,
 		.N = 2,
 		.EX_N = 0,
-		.EX_R = 1,
+		.EX_O = 1,
 		.make = make_pty,
 		.report = report_pty,
 		.free = free_pty,
 		.params = (struct parameter []) {
 			PARAM_END
-		}
+		},
+		.o_descs = (const char *[]){
+			"the index of the slave device",
+		},
 	},
 	{
 		.name = "mmap",
@@ -4303,12 +4294,32 @@ static const struct factory factories[] = {
 		.make = make_sockdiag,
 		.params = (struct parameter []) {
 			{
+				.name = "type",
+				.type = PTYPE_STRING,
+				.desc = "dgram or raw",
+				.defv.string = "dgram",
+			},
+			{
 				.name = "family",
 				.type = PTYPE_STRING,
 				/* TODO: inet, inet6 */
-				.desc = "name of a protocol family ([unix])",
+				.desc = "name of a protocol family ([unix]|vsock)",
 				.defv.string = "unix",
 			},
+			PARAM_END
+		}
+	},
+	{
+		.name = "foreign-sockets",
+		.desc = "import sockets made in a foreign network namespaec",
+		.priv = true,
+		.N = 2,
+		.EX_N = 0,
+		.EX_O = 1,
+		.make = make_foreign_sockets,
+		.report = report_foreign_sockets,
+		.free = free_foreign_sockets,
+		.params = (struct parameter []) {
 			PARAM_END
 		}
 	},
@@ -4331,7 +4342,7 @@ static void print_factory(const struct factory *factory)
 	       factory->name,
 	       factory->priv? "yes": "no",
 	       factory->N,
-	       factory->EX_R + 1,
+	       factory->EX_O + 1,
 	       count_parameters(factory),
 	       factory->desc);
 }
@@ -4368,6 +4379,25 @@ static void list_parameters(const char *factory_name)
 		printf(fmt, p->name, ptype_classes[p->type].name, defv, p->desc);
 		free(defv);
 	}
+}
+
+static void list_output_values(const char *factory_name)
+{
+	const struct factory *factory = find_factory(factory_name);
+	const char *fmt = "%3d %s\n";
+	const char **o;
+
+	if (!factory)
+		errx(EXIT_FAILURE, "no such factory: %s", factory_name);
+
+	printf("%-3s %s\n", "NTH", "DESCRIPTION");
+	printf(fmt, 0, "the pid owning the file descriptor(s)");
+
+	o  = factory->o_descs;
+	if (!o)
+		return;
+	for (int i = 0; i < factory->EX_O; i++)
+		printf(fmt, i + 1, o[i]);
 }
 
 static void rename_self(const char *comm)
@@ -4554,17 +4584,18 @@ int main(int argc, char **argv)
 		{ "is-available",required_argument,NULL, 'a' },
 		{ "list",	no_argument, NULL, 'l' },
 		{ "parameters", required_argument, NULL, 'I' },
+		{ "output-values", required_argument, NULL, 'O' },
 		{ "comm",       required_argument, NULL, 'r' },
 		{ "quiet",	no_argument, NULL, 'q' },
 		{ "dont-monitor-stdin", no_argument, NULL, 'X' },
-		{ "dont-puase", no_argument, NULL, 'c' },
+		{ "dont-pause", no_argument, NULL, 'c' },
 		{ "wait-with",  required_argument, NULL, 'w' },
 		{ "multiplexers",no_argument,NULL, 'W' },
 		{ "help",	no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
 
-	while ((c = getopt_long(argc, argv, "a:lhqcI:r:w:WX", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "a:lhqcI:O:r:w:WX", longopts, NULL)) != -1) {
 		switch (c) {
 		case 'h':
 			usage(stdout, EXIT_SUCCESS);
@@ -4575,6 +4606,9 @@ int main(int argc, char **argv)
 			exit(EXIT_SUCCESS);
 		case 'I':
 			list_parameters(optarg);
+			exit(EXIT_SUCCESS);
+		case 'O':
+			list_output_values(optarg);
 			exit(EXIT_SUCCESS);
 		case 'q':
 			quiet = true;
@@ -4645,6 +4679,10 @@ int main(int argc, char **argv)
 			errx(EXIT_FAILURE, "fd number should not be negative: %s", str);
 		if (fd < 3)
 			errx(EXIT_FAILURE, "fd 0, 1, 2 are reserved: %s", str);
+		if (fd > INT_MAX)
+			errx(EXIT_FAILURE, "too large fd number for INT: %s", str);
+
+		reserve_fd(fd);
 		fdescs[i].fd = fd;
 	}
 	optind += factory->N;
@@ -4656,7 +4694,7 @@ int main(int argc, char **argv)
 	if (!quiet) {
 		printf("%d", getpid());
 		if (factory->report) {
-			for (int i = 0; i < factory->EX_R; i++) {
+			for (int i = 0; i < factory->EX_O; i++) {
 				putchar(' ');
 				factory->report(factory, i, data, stdout);
 			}

@@ -183,6 +183,13 @@ int ul_fileeq_init(struct ul_fileeq *eq, const char *method)
 	return 0;
 }
 
+static void reset_fileeq_bufs(struct ul_fileeq *eq)
+{
+	free(eq->buf_a);
+	free(eq->buf_b);
+	eq->buf_last = eq->buf_a = eq->buf_b = NULL;
+}
+
 void ul_fileeq_deinit(struct ul_fileeq *eq)
 {
 	if (!eq)
@@ -192,8 +199,7 @@ void ul_fileeq_deinit(struct ul_fileeq *eq)
 #ifdef USE_FILEEQ_CRYPTOAPI
 	deinit_crypto_api(eq);
 #endif
-	free(eq->buf_a);
-	free(eq->buf_b);
+	reset_fileeq_bufs(eq);
 }
 
 void ul_fileeq_data_close_file(struct ul_fileeq_data *data)
@@ -272,15 +278,18 @@ size_t ul_fileeq_set_size(struct ul_fileeq *eq, uint64_t filesiz,
 		nreads = filesiz / readsiz;
 		/* enlarge readsize for large files */
 		if (nreads > maxdigs)
-			readsiz = filesiz / maxdigs;
+			readsiz = (filesiz + maxdigs - 1) / maxdigs;
 		break;
 	}
 
 	eq->readsiz = readsiz;
-	eq->blocksmax = filesiz / readsiz;
+	eq->blocksmax = (filesiz + readsiz - 1) / readsiz;
 
 	DBG(EQ, ul_debugobj(eq, "set sizes: filesiz=%ju, maxblocks=%" PRIu64 ", readsiz=%zu",
 				eq->filesiz, eq->blocksmax, eq->readsiz));
+
+	reset_fileeq_bufs(eq);
+
 	return eq->blocksmax;
 }
 
@@ -400,7 +409,7 @@ static ssize_t get_digest(struct ul_fileeq *eq, struct ul_fileeq_data *data,
 	if (n > eq->blocksmax)
 		return 0;
 
-	/* return already cached if alvalable */
+	/* return already cached if available */
 	if (n < get_cached_nblocks(data)) {
 		DBG(DATA, ul_debugobj(data, " digest cached"));
 		assert(data->blocks);
@@ -465,7 +474,7 @@ static ssize_t get_intro(struct ul_fileeq *eq, struct ul_fileeq_data *data,
 			return -1;
 		rsz = read_all(fd, (char *) data->intro, sizeof(data->intro));
 		DBG(DATA, ul_debugobj(data, " read %zu bytes intro", sizeof(data->intro)));
-		if (rsz <= 0)
+		if (rsz < 0)
 			return -1;
 		data->nblocks = 1;
 	}

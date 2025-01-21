@@ -18,6 +18,7 @@
 #include <closestream.h>
 #include <xalloc.h>
 #include <getopt.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <dirent.h>
@@ -53,7 +54,7 @@ struct memory_block {
 	int		node;
 	int		nr_zones;
 	int		zones[MAX_NR_ZONES];
-	unsigned int	removable:1;
+	bool		removable;
 };
 
 struct lsmem {
@@ -95,7 +96,7 @@ enum {
 	COL_ZONES,
 };
 
-static char *zone_names[] = {
+static const char *const zone_names[] = {
 	[ZONE_DMA]	= "DMA",
 	[ZONE_DMA32]	= "DMA32",
 	[ZONE_NORMAL]	= "Normal",
@@ -485,6 +486,7 @@ static int memory_block_filter(const struct dirent *de)
 static void read_basic_info(struct lsmem *lsmem)
 {
 	char dir[PATH_MAX];
+	int i = 0;
 
 	if (ul_path_access(lsmem->sysmem, F_OK, "block_size_bytes") != 0)
 		errx(EXIT_FAILURE, _("This system does not support memory blocks"));
@@ -495,8 +497,12 @@ static void read_basic_info(struct lsmem *lsmem)
 	if (lsmem->ndirs <= 0)
 		err(EXIT_FAILURE, _("Failed to read %s"), dir);
 
-	if (memory_block_get_node(lsmem, lsmem->dirs[0]->d_name) != -1)
-		lsmem->have_nodes = 1;
+	for (i = 0; i < lsmem->ndirs; i++) {
+		if (memory_block_get_node(lsmem, lsmem->dirs[i]->d_name) != -1)	{
+			lsmem->have_nodes = 1;
+			break;
+		}
+	}
 
 	/* The valid_zones sysmem attribute was introduced with kernel 3.18 */
 	if (ul_path_access(lsmem->sysmem, F_OK, "memory0/valid_zones") == 0)

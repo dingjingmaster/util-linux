@@ -17,13 +17,14 @@ configure_file(
   output : 'libmount.h',
   configuration : defs,
   install : build_libmount,
-  install_dir : join_paths(get_option('includedir'), 'libmount'),
+  install_dir : get_option('includedir') / 'libmount',
 )
 
 lib_mount_sources = '''
   src/mountP.h
   src/cache.c
   src/fs.c
+  src/fs_statmount.c
   src/init.c
   src/iter.c
   src/lock.c
@@ -31,6 +32,7 @@ lib_mount_sources = '''
   src/optstr.c
   src/tab.c
   src/tab_diff.c
+  src/tab_listmount.c
   src/tab_parse.c
   src/tab_update.c
   src/test.c

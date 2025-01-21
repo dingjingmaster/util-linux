@@ -319,7 +319,7 @@ Note that it is a bad practice to use *mount -a* for _fstab_ checking. The recom
 Remount a subtree somewhere else (so that its contents are available in both places). See above, under *Bind mount operation*.
 
 *-c*, *--no-canonicalize*::
-Don't canonicalize paths. The *mount* command canonicalizes all paths (from the command line or _fstab_) by default. This option can be used together with the *-f* flag for already canonicalized absolute paths. The option is designed for mount helpers which call *mount -i*. It is strongly recommended to not use this command-line option for normal mount operations.
+Do not canonicalize any paths or tags during the mount process. The *mount* command automatically canonicalizes all paths (from the command line or _fstab_). This option can be used in conjunction with the *-f* flag for paths that are already canonicalized. This option is intended for mount helpers that call *mount -i*. It is highly recommended to not use this command-line option for regular mount operations. See also the X-mount.nocanonicalize mount options.
 +
 Note that *mount* does not pass this option to the **/sbin/mount.**__type__ helpers.
 
@@ -468,37 +468,67 @@ include::man-common/help-version.adoc[]
 
 Some of these options are only useful when they appear in the _/etc/fstab_ file.
 
-Some of these options could be enabled or disabled by default in the system kernel. To check the current setting see the options in _/proc/mounts_. Note that filesystems also have per-filesystem specific default mount options (see for example *tune2fs -l* output for ext__N__ filesystems).
+Some of these options could be enabled or disabled by default in the system
+kernel. To check the current setting see the options in _/proc/mounts_. Note
+that filesystems also have per-filesystem specific default mount options (see
+for example *tune2fs -l* output for ext__N__ filesystems).
 
-The options *nosuid*, *noexec*, *nodiratime*, *relatime*, *noatime*, *strictatime*, and *nosymfollow* are interpreted only by the abstract VFS kernel layer and applied to the mountpoint node rather than to the filesystem itself. Try:  
+=== Virtual Filesystem Notes
+
+The Virtual File System (VFS) is the abstract layer in the kernel that provides the
+filesystem interface to userspace programs. It also provides an abstraction within the
+kernel which allows different filesystem implementations to coexist. Some of the mount
+options only apply to this layer.
+
+The options *nosuid*, *noexec*, *nodiratime*, *relatime*, *noatime*,
+*strictatime*, and *nosymfollow* are interpreted only by the
+virtual-filesystem kernel layer and are applied to the mountpoint node rather
+than to the filesystem itself. To get a complete overview of filesystems and VFS options, try:
 ____
 
  findmnt -o TARGET,VFS-OPTIONS,FS-OPTIONS
 ____
 
-to get a complete overview of filesystems and VFS options.
-
-The read-only setting (*ro* or *rw*) is interpreted by VFS and the filesystem
-and depends on how the option is specified on the *mount*(8) command line. The
-default is to interpret it on the filesystem level. The operation "-o bind,remount,ro"
-is applied only to the VFS mountpoint, and operation "-o remount,ro" is applied to
-VFS and filesystem superblock. This semantic allows create a read-only
-mountpoint but keeps the filesystem writable from another mountpoint.
-
-Since v2.39 libmount can use a new kernel mount interface to set the VFS
-options recursive. For backward compatibility, this feature is not enabled by
-default, although recursive operation (e.g. rbind) has been requested. The new
-option argument "recursive" could be specified, for example:
+Since v2.39, libmount can use a new kernel mount interface to set the VFS
+attributes recursively. For backward compatibility, this feature is not enabled by
+default, even if recursive operation (e.g. rbind) has been requested. The new
+option argument "recursive" can be specified, for example:
 ____
 
  mount -orbind,ro=recursive,noexec=recursive,nosuid /foo /bar
 ____
 
-recursively binds filesystems from /foo to /bar, /bar, and all submounts will
-be read-only and noexec, but only /bar itself will be "nosuid". The "recursive"
-optional argument for VFS mount options is an EXPERIMENTAL feature. 
+This recursively binds filesystems from /foo to /bar, making /bar and all submounts
+read-only and noexec, but only /bar itself will be "nosuid". The "recursive"
+optional argument for VFS mount options is an EXPERIMENTAL feature.
 
-The following options apply to any filesystem that is being mounted (but not every filesystem actually honors them - e.g., the *sync* option today has an effect only for ext2, ext3, ext4, fat, vfat, ufs and xfs):
+=== Read-only Setting Notes
+
+The read-only setting (*ro* or *rw*) is interpreted by the virtual-filesystem
+and the filesystem, and it depends on how the option is specified on the
+*mount*(8) command line. For backward compatibility, the default is to use it
+for both layers during standard mount operations.
+
+The operation "-o bind,remount,ro" is applied only to the VFS mountpoint, while
+the operation "-o remount,ro" is applied to both the VFS and filesystem superblock.
+This semantic allows for the creation of a read-only mountpoint while keeping the
+filesystem writable from another mountpoint.
+
+Since version 2.41, libmount has the ability to use optional arguments _vfs_
+and _fs_ (e.g. ro=fs) to specify where the read-only setting should be applied.
+For example, using the command:
+____
+mount -o ro=vfs /dev/sdc1 /A
+____
+will mount the filesystem as read-write on the superblock level, but the /A
+node will be set as read-only. In previous versions, this required an additional "-o
+bind,remount,ro" operation to achieve the same result.
+
+=== Generic Mount Options
+
+The following options apply to any filesystem that is being mounted, but not every
+filesystem actually honors them. For example, the *sync* option only has an effect
+on ext2, ext3, ext4, fat, vfat, ufs, and xfs filesystems.
 
 *async*::
 All I/O to the filesystem should be done asynchronously. (See also the *sync* option.)
@@ -661,10 +691,19 @@ After this call, *mount* reads _fstab_ and merges these options with the options
 +
 remounts all already mounted vfat filesystems in read-only mode. Each of the filesystems is remounted by *mount -o remount,ro* _/dir_ semantic. This means the *mount* command reads _fstab_ or _mtab_ and merges these options with the options from the command line.
 
-*ro*::
-Mount the filesystem read-only.
+*ro*[=_recursive_,_vfs_,_fs_]::
+Mount the filesystem read-only. The optional argument is an experimental feature supported only by
+the file-descriptor based kernel mount API and it is silently ignored for the old *mount*(2) syscall.
++
+The _recursive_ argument forces the VFS attribute to be applied recursively.
++
+The _vfs_ and _fs_ arguments specify the layer where the read-only flag should be applied. The _fs_ specifies
+the filesystem superblock (unique filesystem instance in the kernel), and _vfs_ specifies the mount node. If no attribute is specified, then
+both layers are set to read-only.
++
+For more details, please refer to the *Read-only Setting Notes* section.
 
-*rw*::
+*rw*[=_recursive_,_vfs_,_fs_]::
 Mount the filesystem read-write.
 
 *sync*::
@@ -714,7 +753,17 @@ ____
 *X-mount.mkdir*[=_mode_]::
 Allow to make a target directory (mountpoint) if it does not exist yet. The optional argument _mode_ specifies the filesystem access mode used for *mkdir*(2) in octal notation. The default mode is 0755. This functionality is supported only for root users or when *mount* is executed without suid permissions. The option is also supported as *x-mount.mkdir*, but this notation is deprecated since v2.30. See also *--mkdir* command line option.
 
-**X-mount.subdir=**__directory__::
+*X-mount.nocanonicalize*[=_type_]::
+Allows disabling of canonicalization for mount source and target paths. By default, the `mount` command resolves all paths to their absolute paths without symlinks. However, this behavior may not be desired in certain situations, such as when binding a mount over a symlink, or a symlink over a directory or another symlink. The optional argument _type_ can be either "source" or "target" (mountpoint). If no _type_ is specified, then canonicalization is disabled for both types. This mount option does not affect the conversion of source tags (e.g. LABEL= or UUID=) and fstab processing.
++
+The command line option *--no-canonicalize* overrides this mount option and affects all path and tag conversions in all situations, but it does not modify flags for open_tree syscalls.
++
+Note that *mount*(8) still sanitizes and canonicalizes the source and target paths specified on the command line by non-root users, regardless of the X-mount.nocanonicalize setting.
+
+*X-mount.noloop*::
+Do not create and mount a loop device, even if the source of the mount is a regular file.
+
+*X-mount.subdir=*__directory__::
 Allow mounting sub-directory from a filesystem instead of the root directory. For now, this feature is implemented by temporary filesystem root directory mount in unshared namespace and then bind the sub-directory to the final mount point and umount the root of the filesystem. The sub-directory mount shows up atomically for the rest of the system although it is implemented by multiple *mount*(2) syscalls.
 +
 Note that this feature will not work in session with an unshared private mount namespace (after *unshare --mount*) on old kernels or with *mount*(8) without support for file-descriptors-based mount kernel API. In this case, you need *unshare --mount --propagation shared*.
@@ -741,7 +790,8 @@ The __id-mount__ parameter indicates the starting ID in the new mount.
 The __id-host__ parameter indicates the starting ID in the filesystem.
 The __id-range__ parameter indicates how many IDs are to be mapped.
 It is possible to specify multiple ID-mappings.
-The individual ID-mappings must be separated by spaces.
++
+The individual ID mappings must be separated by spaces. Please note that in the __/etc/fstab__ file, spaces are interpreted as separators between fields. To avoid this, you must escape them using \040. For example, X-mount.idmap=0:0:1\040500:1000:1.
 +
 For example, the ID-mapping *X-mount.idmap=u:1000:0:1 g:1001:1:2 5000:1000:2* creates an idmapped mount where
 UID 0 is mapped to UID 1000, GID 1 is mapped to GUID 1001, GID 2 is mapped to GID 1002, UID and GID 1000 are mapped to 5000, and UID and GID 1001 are mapped to 5001 in the mount.

@@ -120,6 +120,9 @@ AS_CASE([$libdir],
 )
 AC_SUBST([usrlib_execdir])
 
+securelib_execdir='${libdir}/security'
+AC_SUBST([securelib_execdir])
+
 # static configuration maintained by packages (e.g. /usr/lib)
 AC_ARG_VAR([SYSCONFSTATICDIR],
 	   [Path to static system configuration, default ${prefix}/lib])
@@ -260,16 +263,20 @@ AC_PATH_PROG([XSLTPROC], [xsltproc])
 
 linux_os=no
 bsd_os=no
+gnu_os=no
 AS_CASE([${host_os}],
   [*linux*],
      [linux_os=yes],
   [*darwin*],
      [darwin_os=yes],
   [*bsd*],
-     [bsd_os=yes])
+     [bsd_os=yes],
+  [gnu*],
+     [gnu_os=yes])
 AM_CONDITIONAL([LINUX], [test "x$linux_os" = xyes])
 AM_CONDITIONAL([DARWIN], [test "x$darwin_os" = xyes])
 AM_CONDITIONAL([BSD], [test "x$bsd_os" = xyes])
+AM_CONDITIONAL([HURD], [test "x$gnu_os" = xyes])
 
 AS_IF([test  "x$darwin_os" = xyes], [
   AC_DEFINE([_DARWIN_C_SOURCE], [1], [Enable MAP_ANON in sys/mman.h on Mac OS X])
@@ -562,6 +569,13 @@ AC_CHECK_DECL([strsignal],
 		[Define to 1 if have strsignal function prototype])],
 )
 
+AC_CHECK_DECL([BPF_OBJ_NAME_LEN],
+	      [have_bpf_obj_name_len=yes], [have_bpf_obj_name_len=no],
+	      [#include <linux/bpf.h>])
+AC_CHECK_DECL([BPF_TAG_SIZE],
+	      [have_bpf_tag_size=yes], [have_bpf_tag_size=no],
+	      [#include <linux/bpf.h>])
+
 AC_CHECK_DECL([TIOCGLCKTRMIOS],
 	      [have_tiocglcktrmios=yes], [have_tiocglcktrmios=no],
 	      [#include <sys/ioctl.h>])
@@ -577,6 +591,10 @@ AC_CHECK_DECL([SO_PASSCRED],
 	      [have_so_passcred=yes], [have_so_passcred=no],
 	      [#include <sys/types.h>
 	       #include <sys/socket.h>])
+
+AC_CHECK_DECLS([VMADDR_CID_LOCAL], [], [], [
+	       #include <sys/socket.h>
+	       #include <linux/vm_sockets.h>])
 
 AC_CHECK_FUNCS([ \
 	cachestat \
@@ -621,6 +639,7 @@ AC_CHECK_FUNCS([ \
 	ntp_gettime \
 	open_tree \
 	personality \
+	pidfd_getfd \
 	pidfd_open \
 	pidfd_send_signal \
 	posix_fadvise \
@@ -675,6 +694,7 @@ AS_IF([test "x$ul_cv_syscall_setns" = xno], [
    have_setns_syscall="no"
 ])
 
+UL_CHECK_SYSCALL([pidfd_getfd])
 UL_CHECK_SYSCALL([pidfd_open])
 UL_CHECK_SYSCALL([pidfd_send_signal])
 UL_CHECK_SYSCALL([close_range])
@@ -697,7 +717,20 @@ AS_IF([test "x$ul_cv_syscall_fsconfig" = xno ||
 	have_mountfd_api="no"
    ],[
         have_mountfd_api="yes"
-	AC_DEFINE([HAVE_MOUNTFD_API], [1], [Define to 1 if you want mount API based on FDs.])
+	AC_DEFINE([HAVE_MOUNTFD_API], [1], [Define to 1 if you want to use mount API based on FDs.])
+   ])
+
+
+UL_CHECK_SYSCALL([statmount])
+UL_CHECK_SYSCALL([listmount])
+
+AS_IF([test "x$ul_cv_syscall_statmount" = xno ||
+       test "x$ul_cv_syscall_listmount" = xno],
+   [
+	have_statmount_api="no"
+   ],[
+	have_statmount_api="yes"
+	AC_DEFINE([HAVE_STATMOUNT_API], [1], [Define to 1 if you want to use statmount API.])
    ])
 
 
@@ -874,7 +907,7 @@ AM_CONDITIONAL([HAVE_MANPAGES], [test "x$have_manpages" = xyes])
 
 
 AC_ARG_ENABLE([poman],
-  AS_HELP_STRING([--disable-poman], [generate translated man pages]),
+  AS_HELP_STRING([--disable-poman], [do not generate translated man pages]),
   [], [UL_DEFAULT_ENABLE([poman], [check])]
 )
 UL_BUILD_INIT([poman])
@@ -1828,7 +1861,11 @@ AC_CHECK_FUNCS([swapon])
 AC_CHECK_FUNCS([swapoff])
 
 
-UL_BUILD_INIT([lsblk], [check])
+AC_ARG_ENABLE([lsblk],
+  AS_HELP_STRING([--disable-lsblk], [do not build lsblk]),
+  [], [UL_DEFAULT_ENABLE([lsblk], [check])]
+)
+UL_BUILD_INIT([lsblk])
 UL_REQUIRES_LINUX([lsblk])
 UL_REQUIRES_BUILD([lsblk], [libblkid])
 UL_REQUIRES_BUILD([lsblk], [libmount])
@@ -1854,6 +1891,8 @@ UL_BUILD_INIT([lsfd])
 UL_REQUIRES_LINUX([lsfd])
 UL_REQUIRES_BUILD([lsfd], [libsmartcols])
 UL_REQUIRES_HAVE([lsfd], [linux_bpf_h], [linux/bpf.h header file])
+UL_REQUIRES_HAVE([lsfd], [bpf_obj_name_len], [BPF_OBJ_NAME_LEN macro in linux/bpf.h])
+UL_REQUIRES_HAVE([lsfd], [bpf_tag_size], [BPF_TAG_SIZE macro in linux/bpf.h])
 AM_CONDITIONAL([BUILD_LSFD], [test "x$build_lsfd" = xyes])
 
 AC_ARG_ENABLE([lslogins],
@@ -2153,7 +2192,11 @@ UL_BUILD_INIT([readprofile], [check])
 UL_REQUIRES_LINUX([readprofile])
 AM_CONDITIONAL([BUILD_READPROFILE], [test "x$build_readprofile" = xyes])
 
-UL_BUILD_INIT([dmesg], [check])
+AC_ARG_ENABLE([dmesg],
+  AS_HELP_STRING([--disable-dmesg], [do not build dmesg]),
+  [], [UL_DEFAULT_ENABLE([dmesg], [check])]
+)
+UL_BUILD_INIT([dmesg])
 UL_REQUIRES_LINUX([dmesg])
 AM_CONDITIONAL([BUILD_DMESG], [test "x$build_dmesg" = xyes])
 
@@ -2233,6 +2276,9 @@ UL_REQUIRES_HAVE([scriptlive], [pty], [openpty function (libutil)])
 AM_CONDITIONAL([BUILD_SCRIPTLIVE], [test "x$build_scriptlive" = xyes])
 
 
+UL_BUILD_INIT([bits], [yes])
+AM_CONDITIONAL([BUILD_BITS], [test "x$build_bits" = xyes])
+
 UL_BUILD_INIT([col], [check])
 UL_REQUIRES_COMPILE([col], [#include <limits.h>], [__GLIBC__], [building for glibc])
 AM_CONDITIONAL([BUILD_COL], [test "x$build_col" = xyes])
@@ -2247,7 +2293,11 @@ UL_BUILD_INIT([column], [check])
 UL_REQUIRES_BUILD([column], [libsmartcols])
 AM_CONDITIONAL([BUILD_COLUMN], [test "x$build_column" = xyes])
 
-UL_BUILD_INIT([hexdump], [yes])
+AC_ARG_ENABLE([hexdump],
+  AS_HELP_STRING([--disable-hexdump], [do not build hexdump]),
+  [], [UL_DEFAULT_ENABLE([hexdump], [check])]
+)
+UL_BUILD_INIT([hexdump])
 AM_CONDITIONAL([BUILD_HEXDUMP], [test "x$build_hexdump" = xyes])
 
 UL_BUILD_INIT([rev], [yes])
@@ -2489,7 +2539,7 @@ AC_ARG_ENABLE([more],
 )
 UL_BUILD_INIT([more])
 UL_REQUIRES_HAVE([more], [ncursesw, ncurses], [ncursesw or ncurses libraries])
-UL_REQUIRES_LINUX([more])
+UL_REQUIRES_HAVE([more], [sys_signalfd_h], [sys/signalfd.h header])
 AM_CONDITIONAL([BUILD_MORE], [test "x$build_more" = xyes])
 
 
@@ -2694,8 +2744,15 @@ AC_ARG_WITH([econf],
 
 have_econf=no
 AS_IF([test "x$with_econf" != xno], [
-  PKG_CHECK_MODULES([ECONF], [libeconf], [have_econf=yes], [have_econf=no])
-    AS_CASE([$with_econf:$have_econf],
+  PKG_CHECK_MODULES([ECONF], [libeconf],
+     [have_econf=yes
+      AC_CHECK_LIB([econf], [econf_readConfig], [
+	  AC_DEFINE([HAVE_ECONF_READCONFIG], [1], [Define if econf_readConfig exist in -leconf])
+	  ])
+     ],
+     [have_econf=no]
+  )
+  AS_CASE([$with_econf:$have_econf],
     [yes:no],
       [AC_MSG_ERROR([libeconf expected but libeconf not found])],
     [*:yes],
@@ -2783,16 +2840,17 @@ AM_CONDITIONAL([BUILD_PYLIBMOUNT], [test "x$build_pylibmount" = "xyes"])
 
 # We need to introduce a verbatim dependency into the Makefile, without automake
 # trying to interpret it, so push it as a AM_SUBST_NOTMAKE variable.
-verbatim_pylibmount_dependency='
+verbatim_extra_dependency='
 
 # pylibmountexec module must be installed after usrlib_exec libraries,
 # otherwise the libtool relink step will fail to find libmount.la and
 # will try -lmount which is possibly not available.
 install-pylibmountexecLTLIBRARIES: install-usrlib_execLTLIBRARIES
+install-securelib_execLTLIBRARIES: install-usrlib_execLTLIBRARIES
 
 '
-AC_SUBST([verbatim_pylibmount_dependency])
-AM_SUBST_NOTMAKE([verbatim_pylibmount_dependency])
+AC_SUBST([verbatim_extra_dependency])
+AM_SUBST_NOTMAKE([verbatim_extra_dependency])
 
 AC_ARG_ENABLE([pg-bell],
   AS_HELP_STRING([--disable-pg-bell], [let pg not ring the bell on invalid keys]),
@@ -2879,6 +2937,14 @@ AC_ARG_ENABLE([makeinstall-setuid],
   [], [enable_makeinstall_setuid=yes]
 )
 AM_CONDITIONAL([MAKEINSTALL_DO_SETUID], [test "x$enable_makeinstall_setuid" = xyes])
+
+
+AC_ARG_ENABLE([makeinstall-tty-setgid],
+	      AS_HELP_STRING([--disable-makeinstall-tty-setgid], [do not setgid for wall, and write during "make install"]),
+  [], [enable_makeinstall_tty_setgid=yes]
+)
+AM_CONDITIONAL([MAKEINSTALL_DO_TTY_SETGID], [test "x$enable_makeinstall_tty_setgid" = xyes])
+
 
 
 AC_ARG_ENABLE([colors-default],
